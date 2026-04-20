@@ -56,8 +56,26 @@ if [ -s "${PGDATA}/PG_VERSION" ]; then
             # 直接跳到注册步骤
             goto_register=true
         else
-            echo "[STANDBY] 数据目录存在但非 Standby 模式，停止并重新克隆..."
+            echo "[STANDBY] 数据目录存在但非 Standby 模式（旧主节点），尝试 pg_rewind 增量同步..."
             su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" 2>/dev/null || true
+
+            # repmgr node rejoin 内部调用 pg_rewind 回退时间线分叉，只传输差异 WAL
+            # 比全量 pg_basebackup 克隆快数倍（大库尤为明显）
+            # --force-rewind：授权调用 pg_rewind；需要 wal_log_hints=on（已配置）
+            if su - postgres -c "repmgr node rejoin -f /etc/repmgr.conf \
+                -d 'host=${PARTNER_IP} port=${PGPORT:-5432} user=repmgr dbname=repmgr connect_timeout=5' \
+                --force-rewind --verbose"; then
+                echo "[STANDBY] pg_rewind 增量同步成功，跳过全量克隆"
+                # 确保自定义配置与模板一致，热重载生效
+                cp /etc/pg-ha/conf/postgresql.conf ${PGDATA}/postgresql.conf
+                cp /etc/pg-ha/conf/pg_hba.conf ${PGDATA}/pg_hba.conf
+                sed -i "s/port = 5432/port = ${PGPORT:-5432}/g" ${PGDATA}/postgresql.conf
+                chown postgres:postgres ${PGDATA}/postgresql.conf ${PGDATA}/pg_hba.conf
+                su - postgres -c "pg_ctl -D ${PGDATA} reload" 2>/dev/null || true
+                goto_register=true
+            else
+                echo "[STANDBY] pg_rewind 失败，降级为全量克隆..."
+            fi
         fi
     else
         echo "[STANDBY] 数据目录存在但无法启动，将重新克隆..."
