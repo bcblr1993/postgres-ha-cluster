@@ -113,6 +113,16 @@ su - postgres -c "repmgr -f /etc/repmgr.conf cluster show"
 # ---------------------------------------------------------------------------
 # 步骤 5：启动 repmgrd 守护进程
 # ---------------------------------------------------------------------------
+# 清理残留 PID 文件（同 setup-standby.sh 的处理逻辑）
+if [ -f /tmp/repmgrd.pid ]; then
+    OLD_PID=$(cat /tmp/repmgrd.pid 2>/dev/null || true)
+    if [ -n "${OLD_PID}" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
+        echo "[PRIMARY] repmgrd 已在运行 (PID=${OLD_PID})，跳过启动"
+    else
+        echo "[PRIMARY] 清理残留 repmgrd PID 文件 (PID=${OLD_PID} 进程已不存在)..."
+        rm -f /tmp/repmgrd.pid
+    fi
+fi
 echo "[PRIMARY] 启动 repmgrd 守护进程..."
 su - postgres -c "repmgrd -f /etc/repmgr.conf --pid-file=/tmp/repmgrd.pid --daemonize"
 echo "[PRIMARY] repmgrd 已启动"

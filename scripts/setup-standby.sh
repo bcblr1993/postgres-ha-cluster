@@ -149,6 +149,17 @@ su - postgres -c "repmgr -f /etc/repmgr.conf cluster show"
 # ---------------------------------------------------------------------------
 # 步骤 5：启动 repmgrd 守护进程
 # ---------------------------------------------------------------------------
+# 清理残留 PID 文件：kill -9 / docker kill 等非正常关闭不会触发 SIGTERM 处理器，
+# 导致 /tmp/repmgrd.pid 遗留，下次启动时 repmgrd 误判为已运行而拒绝启动
+if [ -f /tmp/repmgrd.pid ]; then
+    OLD_PID=$(cat /tmp/repmgrd.pid 2>/dev/null || true)
+    if [ -n "${OLD_PID}" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
+        echo "[STANDBY] repmgrd 已在运行 (PID=${OLD_PID})，跳过启动"
+    else
+        echo "[STANDBY] 清理残留 repmgrd PID 文件 (PID=${OLD_PID} 进程已不存在)..."
+        rm -f /tmp/repmgrd.pid
+    fi
+fi
 echo "[STANDBY] 启动 repmgrd 守护进程..."
 su - postgres -c "repmgrd -f /etc/repmgr.conf --pid-file=/tmp/repmgrd.pid --daemonize"
 echo "[STANDBY] repmgrd 已启动"
