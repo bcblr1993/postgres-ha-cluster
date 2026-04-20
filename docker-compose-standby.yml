@@ -1,0 +1,39 @@
+# =============================================================================
+# PostgreSQL 双机热备 - 备节点编排 (Node 2)
+# 用法：docker compose -f docker-compose-standby.yml up -d
+# =============================================================================
+
+services:
+  postgres-ha:
+    image: postgres-ha:1.0
+    container_name: postgres-ha
+    hostname: pg-node2
+    network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+      - NET_BROADCAST
+    environment:
+      - NODE_ROLE=standby
+      - NODE_ID=2
+      - NODE_NAME=pg-node2
+      - REPMGR_PASSWORD=repmgr123
+      - NODE_IP=${PARTNER_IP}
+      - PARTNER_IP=${NODE_IP}
+      - NODE_VIP=${NODE_VIP}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - PGDATA=/var/lib/postgresql/data
+      - PG_PORT=${PG_PORT:-5432}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -p ${PG_PORT:-5432}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  pgdata:
+    driver: local

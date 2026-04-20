@@ -1,0 +1,85 @@
+# =============================================================================
+# PostgreSQL 双机热备 - 本地测试用编排 (同时拉起主备两个节点)
+# 用法：docker compose -f docker-compose-test.yml up -d
+# =============================================================================
+
+networks:
+  ha-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.40.0.0/24
+
+services:
+  pg-node1:
+    image: postgres-ha:1.0
+    container_name: pg-node1
+    hostname: pg-node1
+    networks:
+      ha-net:
+        ipv4_address: 172.40.0.11
+    cap_add:
+      - NET_ADMIN
+      - NET_BROADCAST
+    environment:
+      - NODE_ROLE=primary
+      - NODE_ID=1
+      - NODE_NAME=pg-node1
+      - REPMGR_PASSWORD=repmgr123
+      - NODE_IP=172.40.0.11
+      - PARTNER_IP=172.40.0.12
+      - NODE_VIP=172.40.0.100
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-JvUcMbDxjYY4M8sj}
+      - POSTGRES_DB=${POSTGRES_DB:-thingsboard}
+      - PGDATA=/var/lib/postgresql/data
+      - PG_PORT=${PG_PORT:-5432}
+    volumes:
+      - pgdata_node1:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -p ${PG_PORT:-5432}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  pg-node2:
+    image: postgres-ha:1.0
+    container_name: pg-node2
+    hostname: pg-node2
+    networks:
+      ha-net:
+        ipv4_address: 172.40.0.12
+    cap_add:
+      - NET_ADMIN
+      - NET_BROADCAST
+    environment:
+      - NODE_ROLE=standby
+      - NODE_ID=2
+      - NODE_NAME=pg-node2
+      - REPMGR_PASSWORD=repmgr123
+      - NODE_IP=172.40.0.12
+      - PARTNER_IP=172.40.0.11
+      - NODE_VIP=172.40.0.100
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-JvUcMbDxjYY4M8sj}
+      - POSTGRES_DB=${POSTGRES_DB:-thingsboard}
+      - PGDATA=/var/lib/postgresql/data
+      - PG_PORT=${PG_PORT:-5432}
+    volumes:
+      - pgdata_node2:/var/lib/postgresql/data
+    restart: unless-stopped
+    depends_on:
+      pg-node1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -p ${PG_PORT:-5432}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  pgdata_node1:
+    driver: local
+  pgdata_node2:
+    driver: local
