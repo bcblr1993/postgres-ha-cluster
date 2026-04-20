@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Docker 镜像包（体积过大，通过制品库分发）
+*.tar
+*.tar.gz
+*.zip
+
+# 本地 Claude 记忆目录
+.claude/
+
+# 环境变量（含密码，不入库）
+.env
