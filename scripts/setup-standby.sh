@@ -52,9 +52,24 @@ if [ -s "${PGDATA}/PG_VERSION" ]; then
         # PG 可启动，检查是否为 Standby
         IS_STANDBY=$(su - postgres -c "psql -tAc 'SELECT pg_is_in_recovery()'" 2>/dev/null || echo "error")
         if [ "${IS_STANDBY}" = "t" ]; then
-            echo "[STANDBY] 数据目录有效且已为 Standby 模式，跳过克隆"
-            # 直接跳到注册步骤
-            goto_register=true
+            echo "[STANDBY] 数据目录已为 Standby 模式，验证 WAL streaming 是否正常..."
+            # 等待最多 5 秒确认 WAL streaming 已建立
+            # 若无法建立说明时间线不兼容（曾为 Primary 的崩溃恢复误判），需走 pg_rewind
+            STREAMING=""
+            for _i in $(seq 1 5); do
+                STREAMING=$(su - postgres -c \
+                    "psql -tAc 'SELECT status FROM pg_stat_wal_receiver' 2>/dev/null" 2>/dev/null)
+                [ "${STREAMING}" = "streaming" ] && break
+                sleep 1
+            done
+
+            if [ "${STREAMING}" = "streaming" ]; then
+                echo "[STANDBY] WAL streaming 正常，跳过克隆直接注册"
+                goto_register=true
+            else
+                echo "[STANDBY] WAL streaming 未能建立（时间线可能不兼容），停止并走 pg_rewind..."
+                su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" 2>/dev/null || true
+            fi
         else
             echo "[STANDBY] 数据目录存在但非 Standby 模式（旧主节点），尝试 pg_rewind 增量同步..."
             su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" 2>/dev/null || true
