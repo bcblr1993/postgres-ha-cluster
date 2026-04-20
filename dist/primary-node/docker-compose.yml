@@ -1,0 +1,39 @@
+# =============================================================================
+# PostgreSQL 双机热备 - 主节点编排 (Node 1)
+# 用法：docker compose -f docker-compose-primary.yml up -d
+# =============================================================================
+
+services:
+  postgres-ha:
+    image: postgres-ha:1.0
+    container_name: postgres-ha
+    hostname: pg-node1
+    network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+      - NET_BROADCAST
+    environment:
+      - NODE_ROLE=primary
+      - NODE_ID=1
+      - NODE_NAME=pg-node1
+      - REPMGR_PASSWORD=repmgr123
+      - NODE_IP=${NODE_IP}
+      - PARTNER_IP=${PARTNER_IP}
+      - NODE_VIP=${NODE_VIP}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - PGDATA=/var/lib/postgresql/data
+      - PG_PORT=${PG_PORT:-5432}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -p ${PG_PORT:-5432}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  pgdata:
+    driver: local
