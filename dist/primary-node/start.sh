@@ -1,7 +1,9 @@
 #!/bin/bash
 # =============================================================================
 # PostgreSQL HA - 一键启动脚本
+# 交付包目录默认使用当前目录下的 docker-compose.yml
 # =============================================================================
+set -euo pipefail
 
 echo "========================================="
 echo " PostgreSQL HA - 节点启动"
@@ -17,13 +19,19 @@ if [ ! -f "docker-compose.yml" ]; then
     exit 1
 fi
 
-echo "[信息] 正在拉起集群节点服务..."
-docker compose up -d
-
-if [ $? -eq 0 ]; then
-    echo "[成功] 节点服务已在后台启动！"
-    echo "您可以使用 ./ops.sh 打开运维控制台查看运行状态。"
+if docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker-compose)
 else
-    echo "[错误] 启动失败，请检查 Docker 服务或配置文件。"
+    echo "[错误] 未找到 docker compose / docker-compose 命令。"
     exit 1
 fi
+
+echo "[信息] 使用 Compose 命令: ${COMPOSE_CMD[*]}"
+echo "[信息] 使用编排文件: docker-compose.yml"
+echo "[信息] 正在拉起集群节点服务..."
+"${COMPOSE_CMD[@]}" up -d
+
+echo "[成功] 节点服务已在后台启动！"
+echo "您可以使用 ./ops.sh 打开运维控制台查看运行状态。"

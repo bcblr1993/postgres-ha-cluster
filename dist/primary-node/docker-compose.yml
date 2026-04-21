@@ -1,6 +1,8 @@
 # =============================================================================
 # PostgreSQL 双机热备 - 主节点编排 (Node 1)
-# 用法：docker compose -f docker-compose-primary.yml up -d
+# 用法：
+#   docker compose up -d
+#   docker-compose up -d
 # =============================================================================
 
 services:

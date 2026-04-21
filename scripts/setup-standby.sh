@@ -11,6 +11,42 @@ MAX_WAIT=${MAX_WAIT:-120}
 
 echo "[STANDBY] 开始 Standby 节点初始化..."
 
+partner_is_primary() {
+    PGPASSWORD="${REPMGR_PASSWORD:-repmgr123}" psql \
+        "host=${PARTNER_IP} port=${PGPORT:-5432} user=repmgr dbname=repmgr connect_timeout=2" \
+        -tAc "SELECT NOT pg_is_in_recovery()" 2>/dev/null | grep -q '^t$'
+}
+
+# ---------------------------------------------------------------------------
+# 步骤 0：优先识别本地数据目录角色，兼容双节点同时断电后的恢复
+# ---------------------------------------------------------------------------
+echo "[STANDBY] 检查数据目录权限..."
+chown -R postgres:postgres ${PGDATA}
+chmod 700 ${PGDATA}
+
+if [ -s "${PGDATA}/PG_VERSION" ]; then
+    echo "[STANDBY] 预检查本地数据目录角色..."
+
+    su - postgres -c "pg_ctl -D ${PGDATA} start -w -t 10" 2>/dev/null || true
+    if su - postgres -c "pg_isready -q" 2>/dev/null; then
+        LOCAL_IS_IN_RECOVERY=$(su - postgres -c "psql -tAc 'SELECT pg_is_in_recovery()'" 2>/dev/null | tr -d '[:space:]')
+
+        if [ "${LOCAL_IS_IN_RECOVERY}" = "f" ]; then
+            echo "[STANDBY] 本地数据目录实际为 Primary"
+            su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" 2>/dev/null || true
+
+            if partner_is_primary; then
+                echo "[STANDBY] 对端已是 Primary，当前节点将以旧主回归路径重新加入为 Standby"
+            else
+                echo "[STANDBY] 对端未成为 Primary，当前节点恢复为 Primary 提供服务"
+                exec /usr/local/bin/setup-primary.sh
+            fi
+        fi
+
+        su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" 2>/dev/null || true
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 步骤 1：等待 Primary 节点可达
 # ---------------------------------------------------------------------------
@@ -30,13 +66,6 @@ done
 
 # 额外等待几秒确保 Primary 完全就绪（repmgr 已注册）
 sleep 3
-
-# ---------------------------------------------------------------------------
-# 步骤 1.5：修复数据目录权限（兼容 Bind Mount 模式）
-# ---------------------------------------------------------------------------
-echo "[STANDBY] 检查数据目录权限..."
-chown -R postgres:postgres ${PGDATA}
-chmod 700 ${PGDATA}
 
 # ---------------------------------------------------------------------------
 # 步骤 2：从 Primary 克隆数据
@@ -144,7 +173,7 @@ su - postgres -c "repmgr -f /etc/repmgr.conf standby register --force"
 echo "[STANDBY] Standby 节点注册完成"
 
 # 查看集群状态
-su - postgres -c "repmgr -f /etc/repmgr.conf cluster show"
+su - postgres -c "repmgr -f /etc/repmgr.conf cluster show" || true
 
 # ---------------------------------------------------------------------------
 # 步骤 5：启动 repmgrd 守护进程

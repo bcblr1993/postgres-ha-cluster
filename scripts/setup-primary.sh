@@ -19,6 +19,24 @@ partner_is_primary() {
         -tAc "SELECT NOT pg_is_in_recovery()" 2>/dev/null | grep -q '^t$'
 }
 
+# 已有数据目录时，先识别本地真实角色，避免把只读 standby 当 primary 初始化
+if [ -s "${PGDATA}/PG_VERSION" ]; then
+    echo "[PRIMARY] 检测现有数据目录的真实角色..."
+    chown -R postgres:postgres ${PGDATA}
+    chmod 700 ${PGDATA}
+
+    su - postgres -c "pg_ctl -D ${PGDATA} start -w -t 10" 2>/dev/null || true
+    if su - postgres -c "pg_isready -q" 2>/dev/null; then
+        LOCAL_IS_IN_RECOVERY=$(su - postgres -c "psql -tAc 'SELECT pg_is_in_recovery()'" 2>/dev/null | tr -d '[:space:]')
+        su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" 2>/dev/null || true
+
+        if [ "${LOCAL_IS_IN_RECOVERY}" = "t" ]; then
+            echo "[PRIMARY][WARN] 本地数据目录实际为 Standby，切换到 Standby 恢复流程"
+            exec /usr/local/bin/setup-standby.sh
+        fi
+    fi
+fi
+
 if partner_is_primary; then
     echo "[PRIMARY][WARN] 检测到对端 ${PARTNER_IP} 已是 Primary，当前节点将自动作为 Standby 重新加入集群"
     exec /usr/local/bin/setup-standby.sh
@@ -108,7 +126,7 @@ su - postgres -c "repmgr -f /etc/repmgr.conf primary register --force"
 echo "[PRIMARY] Primary 节点注册完成"
 
 # 查看集群状态
-su - postgres -c "repmgr -f /etc/repmgr.conf cluster show"
+su - postgres -c "repmgr -f /etc/repmgr.conf cluster show" || true
 
 # ---------------------------------------------------------------------------
 # 步骤 5：启动 repmgrd 守护进程

@@ -10,6 +10,21 @@ fi
 
 DB_NAME=${POSTGRES_DB:-thingsboard}
 CONTAINER=${CONTAINER_NAME:-postgres-ha}
+PRIMARY_COMPOSE_FILE=${PRIMARY_COMPOSE_FILE:-docker-compose-primary.yml}
+STANDBY_COMPOSE_FILE=${STANDBY_COMPOSE_FILE:-docker-compose-standby.yml}
+
+if docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker-compose)
+else
+    echo "[错误] 未找到 docker compose / docker-compose 命令。"
+    exit 1
+fi
+
+compose_run() {
+    "${COMPOSE_CMD[@]}" "$@"
+}
 
 # 检查容器是否在运行
 check_container() {
@@ -39,7 +54,8 @@ while true; do
     echo "  8) [备节点] 手动主备切换 (Switchover，需 SSH 互通)"
     echo "  9) 重启容器内服务 (keepalived / repmgrd)"
     echo "  --- 灾难恢复 ---"
-    echo "  10) 销毁本地数据，以备用节点身份重新加入集群"
+    echo "  10) 强制销毁本地数据并重建为 Standby（最后手段）"
+    echo "  11) 查看双节点同时断电后的推荐恢复顺序"
     echo "  0) 退出"
     echo "=========================================================="
     read -p "请输入操作编号: " choice
@@ -208,13 +224,14 @@ ORDER BY event_timestamp DESC LIMIT 20;\"" 2>/dev/null
             check_container || true
             echo "----------------------------------------------------------"
             echo " [操作] 灾难恢复：重置并以 Standby 身份重新加入集群"
-            echo " 警告：此操作将清空本地的数据库数据，从对端主节点重新克隆！"
-            echo " 适用场景：旧主节点宕机恢复后，需要以备节点身份重新加入。"
+            echo " 警告：此操作将清空本地数据库数据，从对端主节点重新全量克隆！"
+            echo " 说明：当前版本默认优先支持自动恢复。"
+            echo " 仅在 pg_rewind / 自动回归失败、本地数据卷损坏时使用此操作。"
             echo "----------------------------------------------------------"
             read -p "请输入大写 YES 确认销毁本地数据: " confirm_del
             if [ "$confirm_del" = "YES" ]; then
                 echo "正在停止容器..."
-                docker compose down
+                compose_run -f "${STANDBY_COMPOSE_FILE}" down
                 echo "正在销毁本地数据卷..."
                 # 优先用当前目录名作前缀（Docker Compose 默认行为）
                 VOL_NAME="$(basename "$PWD")_pgdata"
@@ -222,12 +239,30 @@ ORDER BY event_timestamp DESC LIMIT 20;\"" 2>/dev/null
                     docker volume rm "postgres-ha-cluster_pgdata" 2>/dev/null || \
                     echo "[提示] 未找到数据卷，可能已清理。"
                 echo "重新启动容器（以备节点身份重新克隆中）..."
-                docker compose up -d
+                compose_run -f "${STANDBY_COMPOSE_FILE}" up -d
                 echo "恢复流程已启动，请稍后使用选项 1 查看同步状态。"
                 echo "[提示] 首次启动需从主节点克隆数据，约需 1~3 分钟。"
             else
                 echo "已取消。"
             fi
+            ;;
+        11)
+            echo "----------------------------------------------------------"
+            echo " [操作] 双节点同时断电后的推荐恢复顺序"
+            echo "----------------------------------------------------------"
+            echo " 1. 优先启动上次已知的主节点。"
+            echo " 2. 如果无法确认谁是上次主节点，优先启动希望恢复为主节点的那台机器。"
+            echo " 3. 等待该节点恢复完成并接管 VIP。"
+            echo " 4. 再启动另一台机器，它会自动回归为 Standby。"
+            echo ""
+            echo ">>> 启动本机为主节点："
+            printf '  %s -f %s up -d\n' "${COMPOSE_CMD[*]}" "${PRIMARY_COMPOSE_FILE}"
+            echo ""
+            echo ">>> 启动本机为备节点："
+            printf '  %s -f %s up -d\n' "${COMPOSE_CMD[*]}" "${STANDBY_COMPOSE_FILE}"
+            echo ""
+            echo ">>> 恢复完成后检查集群："
+            echo "  docker exec -it ${CONTAINER} su - postgres -c \"repmgr -f /etc/repmgr.conf cluster show\""
             ;;
         0)
             echo "退出控制台。"
