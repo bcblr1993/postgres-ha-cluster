@@ -58,6 +58,7 @@ COPY scripts/setup-standby.sh /usr/local/bin/setup-standby.sh
 COPY scripts/check_postgres.sh /usr/local/bin/check_postgres.sh
 COPY scripts/repmgr-event-hook.sh /usr/local/bin/repmgr-event-hook.sh
 COPY scripts/keepalived-control.sh /usr/local/bin/keepalived-control.sh
+COPY scripts/wecom-notify.sh /usr/local/bin/wecom-notify.sh
 
 # 设置脚本可执行权限
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
@@ -65,7 +66,8 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
     /usr/local/bin/setup-standby.sh \
     /usr/local/bin/check_postgres.sh \
     /usr/local/bin/repmgr-event-hook.sh \
-    /usr/local/bin/keepalived-control.sh
+    /usr/local/bin/keepalived-control.sh \
+    /usr/local/bin/wecom-notify.sh
 
 # 暴露 PostgreSQL 端口
 EXPOSE 5432

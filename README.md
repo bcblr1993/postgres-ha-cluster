@@ -41,6 +41,13 @@ POSTGRES_DB=thingsboard
 # 业务数据库密码 (postgres 超级用户密码)
 POSTGRES_PASSWORD=JvUcMbDxjYY4M8sj
 
+# 企业微信切换通知（可选）
+WECOM_NOTIFY_ENABLED=false
+WECOM_WEBHOOK_URL=
+WECOM_NOTIFY_SITE_NAME=xxxx现场
+WECOM_NOTIFY_TIMEOUT=10
+WECOM_NOTIFY_AT_ALL_ON_FAILOVER=false
+
 # 当前机器的物理 IP (Node1 填 192.168.1.11，Node2 也填这个) 
 # 注意：以下两个 IP 请根据您部署时的实际物理 IP 填写。
 NODE_IP=192.168.1.11
@@ -78,7 +85,19 @@ docker-compose -f docker-compose-standby.yml up -d
 2. 原主节点恢复启动时，会先检测对端是否已经成为新的主节点。
 3. 如果检测到对端已是主节点，原主节点会自动转为 `standby`，重新克隆并加入集群，而不会继续以旧主身份对外提供写服务。
 
-### 第七步：双节点同时断电后的恢复顺序
+### 第七步：企业微信通知（可选）
+如果您希望在主备切换时收到企业微信群机器人通知，可在两台机器的 `.env` 中额外配置：
+
+1. `WECOM_NOTIFY_ENABLED=true`
+2. `WECOM_WEBHOOK_URL=您的企业微信群机器人 Webhook`
+3. `WECOM_NOTIFY_SITE_NAME=现场名称`
+4. 如需在自动故障切换时提醒群成员，可设置 `WECOM_NOTIFY_AT_ALL_ON_FAILOVER=true`
+
+当前版本会在以下场景发送通知：
+- 自动故障切换完成：显示当前主节点、VIP、可写状态、本机物理 IP
+- 旧主重新加入为 Standby：显示当前主节点、只读待机状态、双节点拓扑已恢复
+
+### 第八步：双节点同时断电后的恢复顺序
 如果两台机器同时断电或同时宕机，推荐按以下顺序恢复：
 
 1. 先启动最近一次的主节点。

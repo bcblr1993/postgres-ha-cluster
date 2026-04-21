@@ -29,6 +29,21 @@ echo " 对端 IP: ${PARTNER_IP}"
 echo " 虚拟 IP: ${NODE_VIP}"
 echo "============================================="
 
+RUNTIME_ENV_FILE="/etc/pg-ha/runtime-notify.env"
+
+cat > "${RUNTIME_ENV_FILE}" <<EOF
+NODE_NAME=${NODE_NAME}
+NODE_IP=${NODE_IP}
+PARTNER_IP=${PARTNER_IP}
+NODE_VIP=${NODE_VIP}
+WECOM_NOTIFY_ENABLED=${WECOM_NOTIFY_ENABLED:-false}
+WECOM_WEBHOOK_URL=${WECOM_WEBHOOK_URL:-}
+WECOM_NOTIFY_SITE_NAME=${WECOM_NOTIFY_SITE_NAME:-PostgreSQL HA 现场}
+WECOM_NOTIFY_TIMEOUT=${WECOM_NOTIFY_TIMEOUT:-10}
+WECOM_NOTIFY_AT_ALL_ON_FAILOVER=${WECOM_NOTIFY_AT_ALL_ON_FAILOVER:-false}
+EOF
+chmod 644 "${RUNTIME_ENV_FILE}"
+
 # ---------------------------------------------------------------------------
 # Keepalived 控制函数
 # ---------------------------------------------------------------------------

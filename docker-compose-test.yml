@@ -33,6 +33,11 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-thingsboard}
       - PGDATA=/var/lib/postgresql/data
       - PG_PORT=${PG_PORT:-5432}
+      - WECOM_NOTIFY_ENABLED=${WECOM_NOTIFY_ENABLED:-false}
+      - WECOM_WEBHOOK_URL=${WECOM_WEBHOOK_URL:-}
+      - WECOM_NOTIFY_SITE_NAME=${WECOM_NOTIFY_SITE_NAME:-本地联调环境}
+      - WECOM_NOTIFY_TIMEOUT=${WECOM_NOTIFY_TIMEOUT:-10}
+      - WECOM_NOTIFY_AT_ALL_ON_FAILOVER=${WECOM_NOTIFY_AT_ALL_ON_FAILOVER:-false}
     volumes:
       - pgdata_node1:/var/lib/postgresql/data
     restart: unless-stopped
@@ -65,6 +70,11 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-thingsboard}
       - PGDATA=/var/lib/postgresql/data
       - PG_PORT=${PG_PORT:-5432}
+      - WECOM_NOTIFY_ENABLED=${WECOM_NOTIFY_ENABLED:-false}
+      - WECOM_WEBHOOK_URL=${WECOM_WEBHOOK_URL:-}
+      - WECOM_NOTIFY_SITE_NAME=${WECOM_NOTIFY_SITE_NAME:-本地联调环境}
+      - WECOM_NOTIFY_TIMEOUT=${WECOM_NOTIFY_TIMEOUT:-10}
+      - WECOM_NOTIFY_AT_ALL_ON_FAILOVER=${WECOM_NOTIFY_AT_ALL_ON_FAILOVER:-false}
     volumes:
       - pgdata_node2:/var/lib/postgresql/data
     restart: unless-stopped

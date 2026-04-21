@@ -8,6 +8,7 @@ set -e
 PGDATA=${PGDATA:-"/var/lib/postgresql/data"}
 PARTNER_IP=${PARTNER_IP:-"192.168.1.11"}
 MAX_WAIT=${MAX_WAIT:-120}
+REJOIN_REASON=""
 
 echo "[STANDBY] 开始 Standby 节点初始化..."
 
@@ -37,6 +38,7 @@ if [ -s "${PGDATA}/PG_VERSION" ]; then
 
             if partner_is_primary; then
                 echo "[STANDBY] 对端已是 Primary，当前节点将以旧主回归路径重新加入为 Standby"
+                REJOIN_REASON="detected-old-primary"
             else
                 echo "[STANDBY] 对端未成为 Primary，当前节点恢复为 Primary 提供服务"
                 exec /usr/local/bin/setup-primary.sh
@@ -101,6 +103,7 @@ if [ -s "${PGDATA}/PG_VERSION" ]; then
             fi
         else
             echo "[STANDBY] 数据目录存在但非 Standby 模式（旧主节点），尝试 pg_rewind 增量同步..."
+            REJOIN_REASON="old-primary-rejoin"
             su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" 2>/dev/null || true
 
             # repmgr node rejoin 内部调用 pg_rewind 回退时间线分叉，只传输差异 WAL
@@ -192,5 +195,14 @@ fi
 echo "[STANDBY] 启动 repmgrd 守护进程..."
 su - postgres -c "repmgrd -f /etc/repmgr.conf --pid-file=/tmp/repmgrd.pid --daemonize"
 echo "[STANDBY] repmgrd 已启动"
+
+if [ -n "${REJOIN_REASON}" ]; then
+    /usr/local/bin/wecom-notify.sh \
+        "node_rejoin" \
+        "1" \
+        "$(date '+%F %T %z')" \
+        "node \"${NODE_NAME:-unknown}\" 已重新加入集群并以 Standby 跟随 \"${PARTNER_IP}\"" \
+        >> /var/log/repmgr/wecom-notify.log 2>&1 || true
+fi
 
 echo "[STANDBY] Standby 节点初始化完成！"

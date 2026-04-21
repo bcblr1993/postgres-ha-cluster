@@ -72,6 +72,13 @@ POSTGRES_PASSWORD=your_strong_password
 # PostgreSQL 端口（默认 5432）
 PG_PORT=5432
 
+# 企业微信切换通知（可选）
+WECOM_NOTIFY_ENABLED=false
+WECOM_WEBHOOK_URL=
+WECOM_NOTIFY_SITE_NAME=xxxx现场
+WECOM_NOTIFY_TIMEOUT=10
+WECOM_NOTIFY_AT_ALL_ON_FAILOVER=false
+
 # 机器 1（主节点）的物理 IP
 NODE_IP=192.168.1.11
 
@@ -80,6 +87,8 @@ PARTNER_IP=192.168.1.12
 ```
 
 > ⚠️ **两台机器的 `.env` 内容完全相同，复制粘贴即可，不需要区分主备填写。**
+>
+> 如果需要企业微信通知，请把 `WECOM_NOTIFY_ENABLED` 改为 `true`，并填写 `WECOM_WEBHOOK_URL` 和 `WECOM_NOTIFY_SITE_NAME`。
 
 ### 3.3 导入 Docker 镜像
 
@@ -211,6 +220,25 @@ VIP 自动漂移到新主节点
 旧主节点重新上线后，会**自动以备节点身份重新加入集群**，VIP 不会被它抢回（`nopreempt` 机制保证）。
 
 若旧主节点的数据与新主节点差距过大，无法自动同步，再执行运维控制台选项 `10` 强制重建为 `standby`。该操作属于最后手段，常规恢复不需要先清空数据卷。
+
+### 企业微信通知（可选）
+
+启用企业微信通知后，系统会在以下场景主动发送 Markdown 消息：
+
+1. 自动故障切换完成
+2. 旧主节点回归为 `standby`
+
+通知内容包含：
+
+1. 现场名称
+2. 当前主节点
+3. 当前节点角色
+4. VIP 是否已接管
+5. 数据库是否可写
+6. 本机物理 IP、对端物理 IP、宿主机名
+7. PostgreSQL / Keepalived 当前状态
+
+如果配置了 `WECOM_NOTIFY_AT_ALL_ON_FAILOVER=true`，则自动故障切换告警会额外带 `<@all>` 提醒。建议 `WECOM_NOTIFY_TIMEOUT` 不低于 `10` 秒。
 
 ### 双节点同时宕机后的恢复
 
