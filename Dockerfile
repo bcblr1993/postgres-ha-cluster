@@ -14,7 +14,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
 
 # 安装 repmgr、keepalived 及辅助工具
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update -o Acquire::Retries=5 \
+    && apt-get install -y --fix-missing -o Acquire::Retries=5 --no-install-recommends \
     # repmgr（从 PostgreSQL 官方仓库获取）
     postgresql-15-repmgr \
     # Keepalived - VRRP 虚拟 IP 管理

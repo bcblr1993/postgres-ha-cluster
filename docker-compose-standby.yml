@@ -32,6 +32,7 @@ services:
       - WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-true}
       - WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}
       - WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-true}
+      - TZ=${TZ:-Asia/Shanghai}
       - HA_LOG_MAX_SIZE_MB=${HA_LOG_MAX_SIZE_MB:-20}
       - HA_LOG_KEEP_FILES=${HA_LOG_KEEP_FILES:-5}
       - HA_PG_LOG_KEEP_FILES=${HA_PG_LOG_KEEP_FILES:-10}
@@ -39,6 +40,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ${WAL_ARCHIVE_PATH:-./wal-archive}:/var/lib/postgresql/wal-archive
+      - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
     logging:
       driver: json-file
