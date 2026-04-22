@@ -5,6 +5,8 @@
 # =============================================================================
 set -e
 
+. /usr/local/bin/ha-log.sh
+
 # ---------------------------------------------------------------------------
 # 环境变量（由 docker-compose 注入）
 # ---------------------------------------------------------------------------
@@ -18,6 +20,12 @@ PGDATA=${PGDATA:-"/var/lib/postgresql/data"}
 REPMGR_PASSWORD=${REPMGR_PASSWORD:-"repmgr123"}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-"postgres123"}
 export PGPORT=${PG_PORT:-5432}
+WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-"true"}
+WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-"/var/lib/postgresql/wal-archive"}
+WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-"true"}
+RUN_ID="entrypoint-$(date +%s)-$$-${NODE_NAME}"
+ha_log_init "docker-entrypoint" "${RUN_ID}"
+SCRIPT_START_TS=$(date +%s)
 
 echo "============================================="
 echo " PostgreSQL HA 节点启动"
@@ -27,7 +35,11 @@ echo " 节点名称: ${NODE_NAME}"
 echo " 本机 IP: ${NODE_IP}"
 echo " 对端 IP: ${PARTNER_IP}"
 echo " 虚拟 IP: ${NODE_VIP}"
+echo " WAL 归档: ${WAL_ARCHIVE_ENABLED}"
+echo " WAL 目录: ${WAL_ARCHIVE_DIR}"
+echo " WAL 接收: ${WAL_RECEIVER_ENABLED}"
 echo "============================================="
+ha_log_section "容器入口启动 role=${NODE_ROLE} node_id=${NODE_ID} node_name=${NODE_NAME} node_ip=${NODE_IP} partner_ip=${PARTNER_IP} vip=${NODE_VIP} pgport=${PGPORT} wal_archive_enabled=${WAL_ARCHIVE_ENABLED} wal_archive_dir=${WAL_ARCHIVE_DIR} wal_receiver_enabled=${WAL_RECEIVER_ENABLED}"
 
 RUNTIME_ENV_FILE="/etc/pg-ha/runtime-notify.env"
 
@@ -36,13 +48,19 @@ NODE_NAME=${NODE_NAME}
 NODE_IP=${NODE_IP}
 PARTNER_IP=${PARTNER_IP}
 NODE_VIP=${NODE_VIP}
+PGPORT=${PGPORT}
 WECOM_NOTIFY_ENABLED=${WECOM_NOTIFY_ENABLED:-false}
 WECOM_WEBHOOK_URL=${WECOM_WEBHOOK_URL:-}
 WECOM_NOTIFY_SITE_NAME=${WECOM_NOTIFY_SITE_NAME:-PostgreSQL HA 现场}
 WECOM_NOTIFY_TIMEOUT=${WECOM_NOTIFY_TIMEOUT:-10}
 WECOM_NOTIFY_AT_ALL_ON_FAILOVER=${WECOM_NOTIFY_AT_ALL_ON_FAILOVER:-false}
+REPMGR_PASSWORD=${REPMGR_PASSWORD}
+WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED}
+WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR}
+WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED}
 EOF
 chmod 644 "${RUNTIME_ENV_FILE}"
+ha_log_info "runtime_notify_env_written path=${RUNTIME_ENV_FILE}"
 
 # ---------------------------------------------------------------------------
 # Keepalived 控制函数
@@ -50,32 +68,33 @@ chmod 644 "${RUNTIME_ENV_FILE}"
 start_keepalived() {
     if pgrep -x keepalived >/dev/null 2>&1; then
         KEEPALIVED_PID=$(pgrep -x keepalived | head -n 1)
-        echo "[INFO] Keepalived 已在运行 (PID: ${KEEPALIVED_PID})"
+        ha_log_info "keepalived_already_running pid=${KEEPALIVED_PID}"
         return 0
     fi
 
-    echo "[INFO] 启动 Keepalived..."
+    ha_log_info "keepalived_start_requested"
     /usr/local/bin/keepalived-control.sh start
     KEEPALIVED_PID=$(cat /var/run/keepalived.pid 2>/dev/null || true)
-    echo "[INFO] Keepalived 已启动 (PID: ${KEEPALIVED_PID:-unknown})"
+    ha_log_info "keepalived_started pid=${KEEPALIVED_PID:-unknown}"
 }
 
 stop_keepalived() {
-    echo "[INFO] 停止 Keepalived..."
+    ha_log_info "keepalived_stop_requested"
     /usr/local/bin/keepalived-control.sh stop || true
 }
 
 # ---------------------------------------------------------------------------
 # 复制并动态替换配置文件中的 IP 地址
 # ---------------------------------------------------------------------------
-echo "[INFO] 复制 repmgr 配置文件..."
+ha_log_info "copy_repmgr_config source=/etc/pg-ha/conf/repmgr-node${NODE_ID}.conf target=/etc/repmgr.conf"
 cp /etc/pg-ha/conf/repmgr-node${NODE_ID}.conf /etc/repmgr.conf
 # 动态替换 conninfo 中的 IP 和端口
 sed -i "s|host=192.168.1.1[0-9]*|host=${NODE_IP}|g" /etc/repmgr.conf
 sed -i "s|connect_timeout=2|connect_timeout=2 port=${PGPORT}|g" /etc/repmgr.conf
 chown postgres:postgres /etc/repmgr.conf
+ha_log_info "repmgr_config_ready node_ip=${NODE_IP} pgport=${PGPORT}"
 
-echo "[INFO] 复制 keepalived 配置文件..."
+ha_log_info "copy_keepalived_config source=/etc/pg-ha/conf/keepalived-node${NODE_ID}.conf target=/etc/keepalived/keepalived.conf"
 cp /etc/pg-ha/conf/keepalived-node${NODE_ID}.conf /etc/keepalived/keepalived.conf
 # 动态替换 Keepalived 中的 IP
 sed -i "s|unicast_src_ip 192.168.1.1[0-9]*|unicast_src_ip ${NODE_IP}|g" /etc/keepalived/keepalived.conf
@@ -86,29 +105,36 @@ sed -i "s|192.168.1.100|${NODE_VIP}|g" /etc/keepalived/keepalived.conf
 NODE_INTERFACE=$(ip -o addr show | grep -w "${NODE_IP}" | awk '{print $2}' | head -n 1)
 if [ -z "${NODE_INTERFACE}" ]; then
     NODE_INTERFACE="eth0"
-    echo "[WARN] 无法自动推断 ${NODE_IP} 的网卡名称，默认回退使用 ${NODE_INTERFACE}"
+    ha_log_warn "interface_detect_failed node_ip=${NODE_IP} fallback=${NODE_INTERFACE}"
 else
-    echo "[INFO] 自动推断 ${NODE_IP} 所在网卡为: ${NODE_INTERFACE}"
+    ha_log_info "interface_detected node_ip=${NODE_IP} interface=${NODE_INTERFACE}"
 fi
 sed -i "s|interface eth0|interface ${NODE_INTERFACE}|g" /etc/keepalived/keepalived.conf
+ha_log_info "keepalived_config_ready interface=${NODE_INTERFACE} partner_ip=${PARTNER_IP} vip=${NODE_VIP}"
 
 # ---------------------------------------------------------------------------
 # 确保日志目录存在
 # ---------------------------------------------------------------------------
 mkdir -p /var/log/repmgr
 chown postgres:postgres /var/log/repmgr
+ha_log_info "log_directory_ready path=/var/log/repmgr"
+
+mkdir -p "${WAL_ARCHIVE_DIR}"
+chown postgres:postgres "${WAL_ARCHIVE_DIR}"
+chmod 700 "${WAL_ARCHIVE_DIR}"
+ha_log_info "wal_archive_directory_ready path=${WAL_ARCHIVE_DIR} enabled=${WAL_ARCHIVE_ENABLED}"
 
 # ---------------------------------------------------------------------------
 # 根据角色执行初始化
 # ---------------------------------------------------------------------------
 if [ "${NODE_ROLE}" = "primary" ]; then
-    echo "[INFO] 以 Primary 角色启动..."
+    ha_log_info "handoff_setup role=primary script=/usr/local/bin/setup-primary.sh"
     /usr/local/bin/setup-primary.sh
 elif [ "${NODE_ROLE}" = "standby" ]; then
-    echo "[INFO] 以 Standby 角色启动..."
+    ha_log_info "handoff_setup role=standby script=/usr/local/bin/setup-standby.sh"
     /usr/local/bin/setup-standby.sh
 else
-    echo "[ERROR] 未知的 NODE_ROLE: ${NODE_ROLE}，必须为 primary 或 standby"
+    ha_log_error "unknown_node_role value=${NODE_ROLE}"
     exit 1
 fi
 
@@ -118,27 +144,29 @@ fi
 if su - postgres -c "psql -tAc 'SELECT pg_is_in_recovery()'" 2>/dev/null | grep -q '^f$'; then
     start_keepalived
 else
-    echo "[INFO] 当前节点不是 Primary，跳过 Keepalived 启动"
+    ha_log_info "skip_keepalived_start reason=node_not_primary"
 fi
 
 # ---------------------------------------------------------------------------
 # 信号处理 - 优雅关闭
 # ---------------------------------------------------------------------------
 cleanup() {
-    echo "[INFO] 收到停止信号，开始优雅关闭..."
+    ha_log_warn "signal_received action=cleanup"
 
     # 停止 Keepalived
     stop_keepalived
 
+    /usr/local/bin/wal-receiver-control.sh stop || true
+
     # 停止 repmgrd
-    echo "[INFO] 停止 repmgrd..."
+    ha_log_info "repmgrd_stop_requested"
     su - postgres -c "kill \$(cat /tmp/repmgrd.pid 2>/dev/null) 2>/dev/null" || true
 
     # 停止 PostgreSQL
-    echo "[INFO] 停止 PostgreSQL..."
+    ha_log_info "postgres_stop_requested pgdata=${PGDATA}"
     su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" || true
 
-    echo "[INFO] 所有服务已停止"
+    ha_log_info "cleanup_complete total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s"
     exit 0
 }
 
@@ -147,7 +175,7 @@ trap cleanup SIGTERM SIGINT SIGQUIT
 # ---------------------------------------------------------------------------
 # 前台等待（保持容器运行）
 # ---------------------------------------------------------------------------
-echo "[INFO] 所有服务已启动，等待信号..."
+ha_log_info "services_ready wait_loop=enabled total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s"
 echo "============================================="
 echo " PostgreSQL HA 节点就绪"
 echo " 角色: ${NODE_ROLE}"
@@ -155,10 +183,19 @@ echo " PG 端口: ${PGPORT}"
 echo "============================================="
 
 # 持续监控子进程，任一退出则重启
+MAIN_LOOP_LAST_PG_STATE="ready"
 while true; do
     # 检查 PostgreSQL 是否存活
     if ! su - postgres -c "pg_isready -q" 2>/dev/null; then
-        echo "[WARN] PostgreSQL 进程异常，等待恢复..."
+        if [ "${MAIN_LOOP_LAST_PG_STATE}" != "unready" ]; then
+            ha_log_warn "postgres_unready_in_main_loop"
+            MAIN_LOOP_LAST_PG_STATE="unready"
+        fi
+    else
+        if [ "${MAIN_LOOP_LAST_PG_STATE}" != "ready" ]; then
+            ha_log_info "postgres_ready_in_main_loop"
+            MAIN_LOOP_LAST_PG_STATE="ready"
+        fi
     fi
     sleep 5
 done

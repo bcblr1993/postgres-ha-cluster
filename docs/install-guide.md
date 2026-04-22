@@ -155,7 +155,7 @@ docker exec -it postgres-ha su - postgres -c "repmgr -f /etc/repmgr.conf cluster
 **② VIP 在主节点上**
 ```bash
 # 在主节点机器执行
-docker exec -it postgres-ha ip addr show eth0 | grep inet
+docker exec -it postgres-ha ip addr show eth0(注意更换网卡名称) | grep inet
 ```
 
 能看到 VIP 地址（如 `172.40.0.100`）说明正常：
@@ -221,6 +221,17 @@ VIP 自动漂移到新主节点
 
 若旧主节点的数据与新主节点差距过大，无法自动同步，再执行运维控制台选项 `10` 强制重建为 `standby`。该操作属于最后手段，常规恢复不需要先清空数据卷。
 
+当前版本中，旧主恢复会优先尝试：
+
+1. 通过 `pg_rewind` 回退时间线分叉。
+2. 通过 `repmgr node rejoin` 挂回新的主节点。
+3. 只有在旧主无法重新建立流复制时，才会降级为全量克隆。
+
+为降低“旧主恢复特别慢”或被误判为失败的概率，当前版本额外做了两项处理：
+
+1. `repmgr conninfo` 中显式增加了 `application_name=<node_name>`，确保新主可以在 `pg_stat_replication` 中准确识别旧主回归连接。
+2. `node_rejoin_timeout` / `standby_reconnect_timeout` 已调整为 `180` 秒，避免旧主恢复时因为连接建立略慢而被过早判定失败。
+
 ### 企业微信通知（可选）
 
 启用企业微信通知后，系统会在以下场景主动发送 Markdown 消息：
@@ -254,6 +265,47 @@ VIP 自动漂移到新主节点
 1. 连续 3 轮主备切换后，集群仍可正常收敛。
 2. 两个节点同时宕机后，`pg-node2` 先恢复、`pg-node1` 后恢复，最终可自动收敛为 `pg-node2=primary`、`pg-node1=standby`。
 3. 在上述过程中，VIP 始终跟随当前 `primary`，测试数据保持一致。
+
+### 最近一次完整回归结果（6 轮切换 + 全断电恢复）
+
+最近一轮完整回归覆盖了：
+
+1. 连续 `6` 轮主备切换。
+2. `VIP` 跟随检查。
+3. 旧主自动回归检查。
+4. 双节点同时断电后的恢复。
+5. 最终数据一致性校验。
+
+切换耗时结果如下：
+
+1. `round1`：`pg-node1 -> pg-node2`，切换 `22s`，旧主回归 `187s`
+2. `round2`：`pg-node2 -> pg-node1`，切换 `22s`，旧主回归 `4s`
+3. `round3`：`pg-node1 -> pg-node2`，切换 `22s`，旧主回归 `5s`
+4. `round4`：`pg-node2 -> pg-node1`，切换 `22s`，旧主回归 `4s`
+5. `round5`：`pg-node1 -> pg-node2`，切换 `23s`，旧主回归 `5s`
+6. `round6`：`pg-node2 -> pg-node1`，切换 `24s`，旧主回归 `4s`
+
+双节点同时断电恢复结果如下：
+
+1. 先恢复 `pg-node1`：`9s` 内恢复为 `primary` 并接管 `VIP`
+2. 再恢复 `pg-node2`：`4s` 内回归为 `standby`
+
+最终一致性结果如下：
+
+1. 最终主节点：`pg-node1`
+2. 最终备节点：`pg-node2`
+3. `VIP` 在主节点：`yes`
+4. 备节点不持有 `VIP`：`yes`
+5. 主备两侧测试数据哈希一致：
+   `22:d31f77c8755dbafee7ba9d8cb3e01ec0`
+
+结论：
+
+1. 自动切换耗时稳定在 `22s~24s`
+2. `VIP` 始终跟随当前 `primary`
+3. 双节点同时断电后的恢复路径可用
+4. 数据一致性校验通过
+5. 第 1 轮旧主回归时间较长，其后回归时间稳定在 `4s~5s`
 
 ### 网络分区（链路中断）场景说明
 

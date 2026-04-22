@@ -10,8 +10,7 @@ fi
 
 DB_NAME=${POSTGRES_DB:-thingsboard}
 CONTAINER=${CONTAINER_NAME:-postgres-ha}
-PRIMARY_COMPOSE_FILE=${PRIMARY_COMPOSE_FILE:-docker-compose-primary.yml}
-STANDBY_COMPOSE_FILE=${STANDBY_COMPOSE_FILE:-docker-compose-standby.yml}
+COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.yml}
 
 if docker compose version >/dev/null 2>&1; then
     COMPOSE_CMD=(docker compose)
@@ -231,7 +230,7 @@ ORDER BY event_timestamp DESC LIMIT 20;\"" 2>/dev/null
             read -p "请输入大写 YES 确认销毁本地数据: " confirm_del
             if [ "$confirm_del" = "YES" ]; then
                 echo "正在停止容器..."
-                compose_run -f "${STANDBY_COMPOSE_FILE}" down
+                compose_run -f "${COMPOSE_FILE}" down
                 echo "正在销毁本地数据卷..."
                 # 优先用当前目录名作前缀（Docker Compose 默认行为）
                 VOL_NAME="$(basename "$PWD")_pgdata"
@@ -239,7 +238,7 @@ ORDER BY event_timestamp DESC LIMIT 20;\"" 2>/dev/null
                     docker volume rm "postgres-ha-cluster_pgdata" 2>/dev/null || \
                     echo "[提示] 未找到数据卷，可能已清理。"
                 echo "重新启动容器（以备节点身份重新克隆中）..."
-                compose_run -f "${STANDBY_COMPOSE_FILE}" up -d
+                compose_run -f "${COMPOSE_FILE}" up -d
                 echo "恢复流程已启动，请稍后使用选项 1 查看同步状态。"
                 echo "[提示] 首次启动需从主节点克隆数据，约需 1~3 分钟。"
             else
@@ -255,11 +254,11 @@ ORDER BY event_timestamp DESC LIMIT 20;\"" 2>/dev/null
             echo " 3. 等待该节点恢复完成并接管 VIP。"
             echo " 4. 再启动另一台机器，它会自动回归为 Standby。"
             echo ""
-            echo ">>> 启动本机为主节点："
-            printf '  %s -f %s up -d\n' "${COMPOSE_CMD[*]}" "${PRIMARY_COMPOSE_FILE}"
+            echo ">>> 当前交付包所在目录启动命令："
+            printf '  %s -f %s up -d\n' "${COMPOSE_CMD[*]}" "${COMPOSE_FILE}"
             echo ""
-            echo ">>> 启动本机为备节点："
-            printf '  %s -f %s up -d\n' "${COMPOSE_CMD[*]}" "${STANDBY_COMPOSE_FILE}"
+            echo ">>> 另一台机器也在它自己的交付包目录中执行相同命令："
+            printf '  %s -f %s up -d\n' "${COMPOSE_CMD[*]}" "${COMPOSE_FILE}"
             echo ""
             echo ">>> 恢复完成后检查集群："
             echo "  docker exec -it ${CONTAINER} su - postgres -c \"repmgr -f /etc/repmgr.conf cluster show\""

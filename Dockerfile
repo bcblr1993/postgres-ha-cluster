@@ -53,21 +53,29 @@ COPY conf/ /etc/pg-ha/conf/
 
 # 复制脚本
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY scripts/ha-log.sh /usr/local/bin/ha-log.sh
 COPY scripts/setup-primary.sh /usr/local/bin/setup-primary.sh
 COPY scripts/setup-standby.sh /usr/local/bin/setup-standby.sh
 COPY scripts/check_postgres.sh /usr/local/bin/check_postgres.sh
 COPY scripts/repmgr-event-hook.sh /usr/local/bin/repmgr-event-hook.sh
 COPY scripts/keepalived-control.sh /usr/local/bin/keepalived-control.sh
 COPY scripts/wecom-notify.sh /usr/local/bin/wecom-notify.sh
+COPY scripts/restore-wal.sh /usr/local/bin/restore-wal.sh
+COPY scripts/wal-receiver-control.sh /usr/local/bin/wal-receiver-control.sh
+COPY scripts/archive-promote-wal.sh /usr/local/bin/archive-promote-wal.sh
 
 # 设置脚本可执行权限
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    /usr/local/bin/ha-log.sh \
     /usr/local/bin/setup-primary.sh \
     /usr/local/bin/setup-standby.sh \
     /usr/local/bin/check_postgres.sh \
     /usr/local/bin/repmgr-event-hook.sh \
     /usr/local/bin/keepalived-control.sh \
-    /usr/local/bin/wecom-notify.sh
+    /usr/local/bin/wecom-notify.sh \
+    /usr/local/bin/restore-wal.sh \
+    /usr/local/bin/wal-receiver-control.sh \
+    /usr/local/bin/archive-promote-wal.sh
 
 # 暴露 PostgreSQL 端口
 EXPOSE 5432

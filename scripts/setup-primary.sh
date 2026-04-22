@@ -5,13 +5,87 @@
 # =============================================================================
 set -e
 
+. /usr/local/bin/ha-log.sh
+
+/usr/local/bin/wal-receiver-control.sh stop >/dev/null 2>&1 || true
+
 PGDATA=${PGDATA:-"/var/lib/postgresql/data"}
 REPMGR_PASSWORD=${REPMGR_PASSWORD:-"repmgr123"}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-"postgres123"}
 POSTGRES_DB=${POSTGRES_DB:-""}
 PARTNER_IP=${PARTNER_IP:-"192.168.1.12"}
+TIMING_LOG=/var/log/repmgr/recovery-timing.log
+RUN_ID="primary-$(date +%s)-$$-${NODE_NAME:-unknown}"
+SCRIPT_START_TS=$(date +%s)
 
-echo "[PRIMARY] 开始 Primary 节点初始化..."
+mkdir -p /var/log/repmgr
+ha_log_init "setup-primary" "${RUN_ID}"
+
+timing_log() {
+    ha_log_timing "$*"
+    echo "[TIMING][${RUN_ID}] $*" >> "${TIMING_LOG}"
+}
+
+timed_postgres_cmd() {
+    local label="$1"
+    local cmd="$2"
+    local start_ts end_ts elapsed
+    start_ts=$(date +%s)
+    ha_log_info "command_start label=${label} cmd=${cmd}"
+    su - postgres -c "${cmd}"
+    end_ts=$(date +%s)
+    elapsed=$((end_ts - start_ts))
+    timing_log "${label} elapsed=${elapsed}s"
+}
+
+apply_runtime_postgres_config() {
+    local target_conf="$1"
+    local archive_enabled="${WAL_ARCHIVE_ENABLED:-true}"
+    local archive_dir="${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}"
+
+    sed -i "s/port = 5432/port = ${PGPORT:-5432}/g" "${target_conf}"
+
+    if [ "${archive_enabled}" = "true" ]; then
+        mkdir -p "${archive_dir}"
+        chown postgres:postgres "${archive_dir}"
+        chmod 700 "${archive_dir}"
+        cat >> "${target_conf}" <<EOF
+
+# Runtime-managed WAL archive settings
+archive_mode = on
+archive_command = 'test ! -f ${archive_dir}/%f && cp %p ${archive_dir}/%f'
+restore_command = '/usr/local/bin/restore-wal.sh ${archive_dir} %f %p'
+recovery_target_timeline = 'latest'
+EOF
+        ha_log_info "runtime_pg_archive_config_applied target=${target_conf} archive_dir=${archive_dir}"
+    else
+        cat >> "${target_conf}" <<'EOF'
+
+# Runtime-managed WAL archive settings
+archive_mode = on
+archive_command = '/bin/true'
+recovery_target_timeline = 'latest'
+EOF
+        ha_log_info "runtime_pg_archive_config_disabled target=${target_conf}"
+    fi
+}
+
+check_partner_primary_with_timing() {
+    local start_ts end_ts elapsed result
+    start_ts=$(date +%s)
+    if partner_is_primary; then
+        result=true
+    else
+        result=false
+    fi
+    end_ts=$(date +%s)
+    elapsed=$((end_ts - start_ts))
+    timing_log "partner_is_primary result=${result} elapsed=${elapsed}s partner=${PARTNER_IP}"
+    [ "${result}" = "true" ]
+}
+
+ha_log_section "开始 Primary 节点初始化"
+timing_log "script_start role=primary pgdata=${PGDATA} partner=${PARTNER_IP}"
 
 partner_is_primary() {
     PGPASSWORD="${REPMGR_PASSWORD}" psql \
@@ -19,33 +93,38 @@ partner_is_primary() {
         -tAc "SELECT NOT pg_is_in_recovery()" 2>/dev/null | grep -q '^t$'
 }
 
+local_data_dir_looks_like_standby() {
+    [ -f "${PGDATA}/standby.signal" ] || [ -f "${PGDATA}/recovery.signal" ]
+}
+
 # 已有数据目录时，先识别本地真实角色，避免把只读 standby 当 primary 初始化
 if [ -s "${PGDATA}/PG_VERSION" ]; then
-    echo "[PRIMARY] 检测现有数据目录的真实角色..."
+    ha_log_info "检查现有数据目录真实角色 pgdata=${PGDATA}"
     chown -R postgres:postgres ${PGDATA}
     chmod 700 ${PGDATA}
 
-    su - postgres -c "pg_ctl -D ${PGDATA} start -w -t 10" 2>/dev/null || true
-    if su - postgres -c "pg_isready -q" 2>/dev/null; then
-        LOCAL_IS_IN_RECOVERY=$(su - postgres -c "psql -tAc 'SELECT pg_is_in_recovery()'" 2>/dev/null | tr -d '[:space:]')
-        su - postgres -c "pg_ctl -D ${PGDATA} stop -m fast" 2>/dev/null || true
-
-        if [ "${LOCAL_IS_IN_RECOVERY}" = "t" ]; then
-            echo "[PRIMARY][WARN] 本地数据目录实际为 Standby，切换到 Standby 恢复流程"
-            exec /usr/local/bin/setup-standby.sh
-        fi
+    PRECHECK_START_TS=$(date +%s)
+    if local_data_dir_looks_like_standby; then
+        timing_log "precheck_offline_role value=standby elapsed=0s"
+        timing_log "precheck_total elapsed=$(( $(date +%s) - PRECHECK_START_TS ))s"
+        ha_log_warn "检测到 standby.signal/recovery.signal，本地数据目录按 Standby 处理"
+        timing_log "handoff_to_standby reason=offline_standby_signal"
+        exec /usr/local/bin/setup-standby.sh
     fi
+    timing_log "precheck_offline_role value=primary elapsed=0s"
+    timing_log "precheck_total elapsed=$(( $(date +%s) - PRECHECK_START_TS ))s"
 fi
 
-if partner_is_primary; then
-    echo "[PRIMARY][WARN] 检测到对端 ${PARTNER_IP} 已是 Primary，当前节点将自动作为 Standby 重新加入集群"
+if check_partner_primary_with_timing; then
+    ha_log_warn "检测到对端已是 Primary，当前节点将自动作为 Standby 重新加入集群 partner=${PARTNER_IP}"
+    timing_log "handoff_to_standby reason=partner_is_primary"
     exec /usr/local/bin/setup-standby.sh
 fi
 
 # ---------------------------------------------------------------------------
 # 步骤 0：修复数据目录权限（兼容 Bind Mount 模式）
 # ---------------------------------------------------------------------------
-echo "[PRIMARY] 检查数据目录权限..."
+ha_log_info "检查数据目录权限 pgdata=${PGDATA}"
 chown -R postgres:postgres ${PGDATA}
 chmod 700 ${PGDATA}
 
@@ -53,21 +132,21 @@ chmod 700 ${PGDATA}
 # 步骤 1：初始化 PostgreSQL 数据目录（如果为空）
 # ---------------------------------------------------------------------------
 if [ ! -s "${PGDATA}/PG_VERSION" ]; then
-    echo "[PRIMARY] 数据目录为空，执行 initdb..."
-    su - postgres -c "initdb -D ${PGDATA} --encoding=UTF8 --locale=C"
+    ha_log_info "数据目录为空，执行 initdb"
+    timed_postgres_cmd "initdb" "initdb -D ${PGDATA} --encoding=UTF8 --locale=C"
 
     # 应用自定义配置
-    echo "[PRIMARY] 应用 postgresql.conf..."
+    ha_log_info "应用 postgresql.conf 和 pg_hba.conf"
     cp /etc/pg-ha/conf/postgresql.conf ${PGDATA}/postgresql.conf
     cp /etc/pg-ha/conf/pg_hba.conf ${PGDATA}/pg_hba.conf
-    sed -i "s/port = 5432/port = ${PGPORT:-5432}/g" ${PGDATA}/postgresql.conf
+    apply_runtime_postgres_config "${PGDATA}/postgresql.conf"
     chown postgres:postgres ${PGDATA}/postgresql.conf ${PGDATA}/pg_hba.conf
 else
-    echo "[PRIMARY] 数据目录已存在，跳过 initdb"
+    ha_log_info "数据目录已存在，跳过 initdb"
     # 仍然更新配置文件（确保配置一致性）
     cp /etc/pg-ha/conf/postgresql.conf ${PGDATA}/postgresql.conf
     cp /etc/pg-ha/conf/pg_hba.conf ${PGDATA}/pg_hba.conf
-    sed -i "s/port = 5432/port = ${PGPORT:-5432}/g" ${PGDATA}/postgresql.conf
+    apply_runtime_postgres_config "${PGDATA}/postgresql.conf"
     chown postgres:postgres ${PGDATA}/postgresql.conf ${PGDATA}/pg_hba.conf
 fi
 
@@ -76,18 +155,20 @@ fi
 # ---------------------------------------------------------------------------
 # 确保日志目录存在
 mkdir -p ${PGDATA}/log && chown postgres:postgres ${PGDATA}/log
-echo "[PRIMARY] 启动 PostgreSQL..."
-su - postgres -c "pg_ctl -D ${PGDATA} -l ${PGDATA}/log/startup.log start -w"
+ha_log_info "启动 PostgreSQL"
+timed_postgres_cmd "primary_pg_start" "pg_ctl -D ${PGDATA} -l ${PGDATA}/log/startup.log start -w"
 
 # 等待 PG 就绪
-echo "[PRIMARY] 等待 PostgreSQL 就绪..."
+ha_log_info "等待 PostgreSQL 就绪"
+READY_WAIT_START_TS=$(date +%s)
 for i in $(seq 1 30); do
     if su - postgres -c "pg_isready -q"; then
-        echo "[PRIMARY] PostgreSQL 已就绪"
+        ha_log_info "PostgreSQL 已就绪 attempts=${i}"
+        timing_log "primary_pg_ready attempts=${i} elapsed=$(( $(date +%s) - READY_WAIT_START_TS ))s"
         break
     fi
     if [ $i -eq 30 ]; then
-        echo "[PRIMARY][ERROR] PostgreSQL 启动超时"
+        ha_log_error "PostgreSQL 启动超时"
         exit 1
     fi
     sleep 1
@@ -96,7 +177,8 @@ done
 # ---------------------------------------------------------------------------
 # 步骤 3：创建 repmgr 用户和数据库（幂等操作）
 # ---------------------------------------------------------------------------
-echo "[PRIMARY] 创建 repmgr 用户和数据库..."
+ha_log_info "创建 repmgr 用户和数据库"
+DB_SETUP_START_TS=$(date +%s)
 
 # 创建 repmgr 超级用户（如果不存在）
 su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='repmgr'\"" | grep -q 1 || \
@@ -111,38 +193,48 @@ su - postgres -c "psql -c \"ALTER USER postgres PASSWORD '${POSTGRES_PASSWORD}'\
 
 # 创建初始业务数据库（如果配置了）
 if [ -n "${POSTGRES_DB}" ]; then
-    echo "[PRIMARY] 初始化业务数据库: ${POSTGRES_DB}"
+    ha_log_info "初始化业务数据库 db=${POSTGRES_DB}"
     su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'\"" | grep -q 1 || \
         su - postgres -c "psql -c \"CREATE DATABASE ${POSTGRES_DB} OWNER postgres\""
 fi
 
-echo "[PRIMARY] repmgr 用户和数据库创建完成"
+ha_log_info "repmgr 用户和数据库创建完成"
+timing_log "primary_db_setup elapsed=$(( $(date +%s) - DB_SETUP_START_TS ))s"
 
 # ---------------------------------------------------------------------------
 # 步骤 4：注册 Primary 节点到 repmgr（幂等操作）
 # ---------------------------------------------------------------------------
-echo "[PRIMARY] 注册 Primary 节点..."
-su - postgres -c "repmgr -f /etc/repmgr.conf primary register --force"
-echo "[PRIMARY] Primary 节点注册完成"
+ha_log_info "注册 Primary 节点"
+timed_postgres_cmd "primary_register" "repmgr -f /etc/repmgr.conf primary register --force"
+ha_log_info "Primary 节点注册完成"
 
 # 查看集群状态
-su - postgres -c "repmgr -f /etc/repmgr.conf cluster show" || true
+ha_log_capture_allow_fail "INFO" "primary_cluster_show" "su - postgres -c \"repmgr -f /etc/repmgr.conf cluster show\"" || true
 
 # ---------------------------------------------------------------------------
 # 步骤 5：启动 repmgrd 守护进程
 # ---------------------------------------------------------------------------
 # 清理残留 PID 文件（同 setup-standby.sh 的处理逻辑）
+START_REPMGRD=true
 if [ -f /tmp/repmgrd.pid ]; then
     OLD_PID=$(cat /tmp/repmgrd.pid 2>/dev/null || true)
-    if [ -n "${OLD_PID}" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
-        echo "[PRIMARY] repmgrd 已在运行 (PID=${OLD_PID})，跳过启动"
+    OLD_COMM=$(ps -p "${OLD_PID:-0}" -o comm= 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -n "${OLD_PID}" ] && [ "${OLD_COMM}" = "repmgrd" ] && kill -0 "${OLD_PID}" 2>/dev/null; then
+        ha_log_info "repmgrd 已在运行 pid=${OLD_PID}，跳过启动"
+        START_REPMGRD=false
     else
-        echo "[PRIMARY] 清理残留 repmgrd PID 文件 (PID=${OLD_PID} 进程已不存在)..."
+        ha_log_warn "清理残留 repmgrd PID 文件 stale_pid=${OLD_PID} stale_comm=${OLD_COMM:-unknown}"
         rm -f /tmp/repmgrd.pid
     fi
 fi
-echo "[PRIMARY] 启动 repmgrd 守护进程..."
-su - postgres -c "repmgrd -f /etc/repmgr.conf --pid-file=/tmp/repmgrd.pid --daemonize"
-echo "[PRIMARY] repmgrd 已启动"
+if [ "${START_REPMGRD}" = "true" ]; then
+    ha_log_info "启动 repmgrd 守护进程"
+    timed_postgres_cmd "primary_repmgrd_start" "repmgrd -f /etc/repmgr.conf --pid-file=/tmp/repmgrd.pid --daemonize"
+    ha_log_info "repmgrd 已启动"
+else
+    ha_log_info "跳过 repmgrd 启动，复用现有进程"
+fi
+ha_log_capture_allow_fail "INFO" "primary_runtime_snapshot" "su - postgres -c \"psql -x -c \\\"SELECT pg_is_in_recovery() AS in_recovery, pg_current_wal_lsn() AS current_wal_lsn\\\"\"" || true
 
-echo "[PRIMARY] Primary 节点初始化完成！"
+ha_log_section "Primary 节点初始化完成"
+timing_log "script_complete role=primary total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s"

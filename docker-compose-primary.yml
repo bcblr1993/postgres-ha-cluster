@@ -29,8 +29,12 @@ services:
       - WECOM_NOTIFY_SITE_NAME=${WECOM_NOTIFY_SITE_NAME:-PostgreSQL HA现场}
       - WECOM_NOTIFY_TIMEOUT=${WECOM_NOTIFY_TIMEOUT:-10}
       - WECOM_NOTIFY_AT_ALL_ON_FAILOVER=${WECOM_NOTIFY_AT_ALL_ON_FAILOVER:-false}
+      - WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-true}
+      - WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}
+      - WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-true}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ${WAL_ARCHIVE_PATH:-./wal-archive}:/var/lib/postgresql/wal-archive
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -p ${PG_PORT:-5432}"]

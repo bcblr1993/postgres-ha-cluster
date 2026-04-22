@@ -38,8 +38,12 @@ services:
       - WECOM_NOTIFY_SITE_NAME=${WECOM_NOTIFY_SITE_NAME:-本地联调环境}
       - WECOM_NOTIFY_TIMEOUT=${WECOM_NOTIFY_TIMEOUT:-10}
       - WECOM_NOTIFY_AT_ALL_ON_FAILOVER=${WECOM_NOTIFY_AT_ALL_ON_FAILOVER:-false}
+      - WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-true}
+      - WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}
+      - WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-true}
     volumes:
       - pgdata_node1:/var/lib/postgresql/data
+      - wal_archive:/var/lib/postgresql/wal-archive
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -p ${PG_PORT:-5432}"]
@@ -75,8 +79,12 @@ services:
       - WECOM_NOTIFY_SITE_NAME=${WECOM_NOTIFY_SITE_NAME:-本地联调环境}
       - WECOM_NOTIFY_TIMEOUT=${WECOM_NOTIFY_TIMEOUT:-10}
       - WECOM_NOTIFY_AT_ALL_ON_FAILOVER=${WECOM_NOTIFY_AT_ALL_ON_FAILOVER:-false}
+      - WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-true}
+      - WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}
+      - WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-true}
     volumes:
       - pgdata_node2:/var/lib/postgresql/data
+      - wal_archive:/var/lib/postgresql/wal-archive
     restart: unless-stopped
     depends_on:
       pg-node1:
@@ -92,4 +100,6 @@ volumes:
   pgdata_node1:
     driver: local
   pgdata_node2:
+    driver: local
+  wal_archive:
     driver: local

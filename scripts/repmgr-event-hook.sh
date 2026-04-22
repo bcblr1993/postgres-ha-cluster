@@ -5,6 +5,8 @@
 # 参数：%n=node_id  %e=event_type  %s=success(1/0)  %t=timestamp  %d=details
 # =============================================================================
 
+. /usr/local/bin/ha-log.sh
+
 NODE_ID=$1
 EVENT_TYPE=$2
 SUCCESS=$3
@@ -14,15 +16,38 @@ DETAILS=$5
 LOG_FILE="/var/log/repmgr/events.log"
 WECOM_LOG_FILE="/var/log/repmgr/wecom-notify.log"
 WECOM_FLAG_DIR="/tmp/repmgr-wecom"
+RUN_ID="repmgr-event-${EVENT_TYPE}-$(date +%s)-$$-node${NODE_ID}"
+ha_log_init "repmgr-event-hook" "${RUN_ID}"
+
+log_event_snapshot() {
+    local local_role vip_present keepalived_state primary_name
+    local_role=$(su - postgres -c "psql -tAc 'SELECT CASE WHEN pg_is_in_recovery() THEN ''standby'' ELSE ''primary'' END'" 2>/dev/null | tr -d '[:space:]' || true)
+    if ip addr show 2>/dev/null | grep -qw "${NODE_VIP:-}"; then
+        vip_present="yes"
+    else
+        vip_present="no"
+    fi
+    if pgrep -x keepalived >/dev/null 2>&1; then
+        keepalived_state="running"
+    else
+        keepalived_state="stopped"
+    fi
+    primary_name=$(su - postgres -c "psql -d repmgr -tAc \"SELECT node_name FROM repmgr.nodes WHERE active IS TRUE AND type = 'primary' ORDER BY node_id LIMIT 1\"" 2>/dev/null | tr -d '[:space:]' || true)
+    ha_log_info "event_snapshot local_role=${local_role:-unknown} vip_present=${vip_present} keepalived=${keepalived_state} primary=${primary_name:-unknown}"
+    ha_log_capture_allow_fail "INFO" "event_cluster_show" "su - postgres -c \"repmgr -f /etc/repmgr.conf cluster show\"" || true
+}
 
 # 记录事件
 echo "[${TIMESTAMP}] Node=${NODE_ID} Event=${EVENT_TYPE} Success=${SUCCESS} Details=${DETAILS}" >> ${LOG_FILE}
+ha_log_info "event_received node_id=${NODE_ID} event=${EVENT_TYPE} success=${SUCCESS} details=${DETAILS}"
+log_event_snapshot
 
 mkdir -p "${WECOM_FLAG_DIR}"
 
 trigger_wecom_notify() {
     local suppress_flag="${1:-}"
     local create_flag="${2:-}"
+    ha_log_info "wecom_notify_scheduled event=${EVENT_TYPE} suppress_flag=${suppress_flag:-none} create_flag=${create_flag:-none}"
 
     (
         if [ -n "${create_flag}" ]; then
@@ -43,6 +68,9 @@ trigger_wecom_notify() {
 # 对关键事件输出到控制台
 case "${EVENT_TYPE}" in
     "standby_promote"|"repmgrd_failover_promote")
+        ha_log_warn "event_action promote keepalived=start"
+        /usr/local/bin/wal-receiver-control.sh stop || true
+        /usr/local/bin/archive-promote-wal.sh || true
         /usr/local/bin/keepalived-control.sh start || true
         if [ "${EVENT_TYPE}" = "standby_promote" ]; then
             trigger_wecom_notify "${WECOM_FLAG_DIR}/failover-promote-${NODE_ID}.flag" ""
@@ -56,7 +84,9 @@ case "${EVENT_TYPE}" in
         echo "============================================="
         ;;
     "standby_follow"|"repmgrd_failover_follow")
+        ha_log_info "event_action follow keepalived=stop"
         /usr/local/bin/keepalived-control.sh stop || true
+        /usr/local/bin/wal-receiver-control.sh start || true
         if [ "${EVENT_TYPE}" = "standby_follow" ]; then
             trigger_wecom_notify "${WECOM_FLAG_DIR}/failover-follow-${NODE_ID}.flag" ""
         else
@@ -68,4 +98,10 @@ case "${EVENT_TYPE}" in
         echo " 详情: ${DETAILS}"
         echo "============================================="
         ;;
+    *)
+        ha_log_info "event_ignored event=${EVENT_TYPE}"
+        ;;
 esac
+
+log_event_snapshot
+ha_log_info "event_processed node_id=${NODE_ID} event=${EVENT_TYPE} success=${SUCCESS}"

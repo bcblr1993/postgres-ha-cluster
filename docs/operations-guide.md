@@ -62,6 +62,12 @@ docker exec -it postgres-ha tail -n 100 /var/log/repmgr/repmgr.log
 **场景：** 真实主节点遭遇断电、网络中断等硬故障。此时集群已经自动进行了转移，备节点会先被 `repmgr` 提升为新的主节点，随后由 `Keepalived` 接管 VIP。
 **重点：** 当前版本下，**旧的主节点**修好并重新开机后，不会继续以旧主身份提供服务；它会检测对端是否已成为新的主节点，如已切主，则自动降级并重新加入集群作为**新的备节点 (Standby)**。
 
+补充说明：
+
+1. 旧主恢复时，系统会优先走 `pg_rewind + repmgr node rejoin` 路径，而不是默认全量克隆。
+2. 当前版本已经为 `repmgr conninfo` 增加 `application_name=<node_name>`，避免旧主恢复后虽然已连上新主，但 `repmgr` 无法在 `pg_stat_replication` 中识别它。
+3. 当前版本已将 `node_rejoin_timeout` / `standby_reconnect_timeout` 提高到 `180` 秒，减少旧主回归时被过早误判失败的概率。
+
 ### 恢复旧的主节点 (重新加入集群)
 
 请在**旧主节点**的机器上，执行以下步骤：
@@ -88,6 +94,26 @@ docker exec -it postgres-ha tail -n 100 /var/log/repmgr/repmgr.log
 
 5. 只有在本地数据卷已经严重损坏、无法完成自动回归时，才建议手工删除容器和数据卷后再重新拉起。常规恢复场景不再需要先手动清卷。
 
+如果现场怀疑“旧主恢复特别慢”，建议优先检查以下 4 项：
+
+1. 新主上是否已经出现旧主的复制连接：
+   ```bash
+   docker exec -it postgres-ha su - postgres -c "psql -x -c \"SELECT application_name, client_addr, state, sync_state FROM pg_stat_replication\""
+   ```
+2. 旧主本地是否已经进入 `standby`：
+   ```bash
+   docker exec -it postgres-ha su - postgres -c "psql -x -c \"SELECT pg_is_in_recovery() AS in_recovery\""
+   ```
+3. 旧主本地 WAL receiver 是否已经建立：
+   ```bash
+   docker exec -it postgres-ha su - postgres -c "psql -x -c \"SELECT status, sender_host, sender_port, conninfo FROM pg_stat_wal_receiver\""
+   ```
+4. 旧主最近的 PostgreSQL / repmgr 日志：
+   ```bash
+   docker logs --tail 200 postgres-ha
+   docker exec -it postgres-ha tail -n 200 /var/log/repmgr/repmgr.log
+   ```
+
 ### 3.2 企业微信通知说明
 
 如果在 `.env` 中启用了企业微信通知：
@@ -113,10 +139,27 @@ docker exec -it postgres-ha tail -n 100 /var/log/repmgr/repmgr.log
 
 已验证通过的典型场景：
 
-1. 连续 3 轮主备切换。
-2. 双节点同时停止后，`pg-node2` 先恢复。
-3. `pg-node1` 随后恢复并自动回归为 `standby`。
+1. 连续 `6` 轮主备切换。
+2. 双节点同时停止后，主节点优先恢复并重新接管 `VIP`。
+3. 第二个节点随后恢复并自动回归为 `standby`。
 4. VIP 始终跟随当前 `primary`，测试数据保持一致。
+
+最近一轮完整回归的结果如下：
+
+1. `round1`：切换 `22s`，旧主回归 `187s`
+2. `round2`：切换 `22s`，旧主回归 `4s`
+3. `round3`：切换 `22s`，旧主回归 `5s`
+4. `round4`：切换 `22s`，旧主回归 `4s`
+5. `round5`：切换 `23s`，旧主回归 `5s`
+6. `round6`：切换 `24s`，旧主回归 `4s`
+7. 双节点同时断电恢复：首节点恢复为主 `9s`，第二节点回归为备 `4s`
+
+最终状态：
+
+1. `VIP` 在当前主节点
+2. 备节点不持有 `VIP`
+3. 主备两侧数据哈希一致：
+   `22:d31f77c8755dbafee7ba9d8cb3e01ec0`
 
 ---
 
