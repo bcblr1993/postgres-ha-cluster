@@ -23,6 +23,10 @@ export PGPORT=${PG_PORT:-5432}
 WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-"true"}
 WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-"/var/lib/postgresql/wal-archive"}
 WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-"true"}
+HA_LOG_MAX_SIZE_MB=${HA_LOG_MAX_SIZE_MB:-20}
+HA_LOG_KEEP_FILES=${HA_LOG_KEEP_FILES:-5}
+HA_PG_LOG_KEEP_FILES=${HA_PG_LOG_KEEP_FILES:-10}
+HA_LOG_SWEEP_INTERVAL_SECS=${HA_LOG_SWEEP_INTERVAL_SECS:-60}
 RUN_ID="entrypoint-$(date +%s)-$$-${NODE_NAME}"
 ha_log_init "docker-entrypoint" "${RUN_ID}"
 SCRIPT_START_TS=$(date +%s)
@@ -38,8 +42,9 @@ echo " 虚拟 IP: ${NODE_VIP}"
 echo " WAL 归档: ${WAL_ARCHIVE_ENABLED}"
 echo " WAL 目录: ${WAL_ARCHIVE_DIR}"
 echo " WAL 接收: ${WAL_RECEIVER_ENABLED}"
+echo " 日志轮转: ${HA_LOG_MAX_SIZE_MB}MB/${HA_LOG_KEEP_FILES}份"
 echo "============================================="
-ha_log_section "容器入口启动 role=${NODE_ROLE} node_id=${NODE_ID} node_name=${NODE_NAME} node_ip=${NODE_IP} partner_ip=${PARTNER_IP} vip=${NODE_VIP} pgport=${PGPORT} wal_archive_enabled=${WAL_ARCHIVE_ENABLED} wal_archive_dir=${WAL_ARCHIVE_DIR} wal_receiver_enabled=${WAL_RECEIVER_ENABLED}"
+ha_log_section "容器入口启动 role=${NODE_ROLE} node_id=${NODE_ID} node_name=${NODE_NAME} node_ip=${NODE_IP} partner_ip=${PARTNER_IP} vip=${NODE_VIP} pgport=${PGPORT} wal_archive_enabled=${WAL_ARCHIVE_ENABLED} wal_archive_dir=${WAL_ARCHIVE_DIR} wal_receiver_enabled=${WAL_RECEIVER_ENABLED} ha_log_max_size_mb=${HA_LOG_MAX_SIZE_MB} ha_log_keep_files=${HA_LOG_KEEP_FILES} ha_pg_log_keep_files=${HA_PG_LOG_KEEP_FILES} ha_log_sweep_interval_secs=${HA_LOG_SWEEP_INTERVAL_SECS}"
 
 RUNTIME_ENV_FILE="/etc/pg-ha/runtime-notify.env"
 
@@ -58,6 +63,10 @@ REPMGR_PASSWORD=${REPMGR_PASSWORD}
 WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED}
 WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR}
 WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED}
+HA_LOG_MAX_SIZE_MB=${HA_LOG_MAX_SIZE_MB}
+HA_LOG_KEEP_FILES=${HA_LOG_KEEP_FILES}
+HA_PG_LOG_KEEP_FILES=${HA_PG_LOG_KEEP_FILES}
+HA_LOG_SWEEP_INTERVAL_SECS=${HA_LOG_SWEEP_INTERVAL_SECS}
 EOF
 chmod 644 "${RUNTIME_ENV_FILE}"
 ha_log_info "runtime_notify_env_written path=${RUNTIME_ENV_FILE}"
@@ -184,6 +193,7 @@ echo "============================================="
 
 # 持续监控子进程，任一退出则重启
 MAIN_LOOP_LAST_PG_STATE="ready"
+LAST_LOG_SWEEP_TS=0
 while true; do
     # 检查 PostgreSQL 是否存活
     if ! su - postgres -c "pg_isready -q" 2>/dev/null; then
@@ -195,6 +205,15 @@ while true; do
         if [ "${MAIN_LOOP_LAST_PG_STATE}" != "ready" ]; then
             ha_log_info "postgres_ready_in_main_loop"
             MAIN_LOOP_LAST_PG_STATE="ready"
+        fi
+    fi
+
+    if [ "${HA_LOG_SWEEP_INTERVAL_SECS}" -gt 0 ]; then
+        NOW_TS=$(date +%s)
+        if [ $(( NOW_TS - LAST_LOG_SWEEP_TS )) -ge "${HA_LOG_SWEEP_INTERVAL_SECS}" ]; then
+            /usr/local/bin/log-maintenance.sh >/dev/null 2>&1 || \
+                ha_log_warn "log_maintenance_failed interval=${HA_LOG_SWEEP_INTERVAL_SECS}"
+            LAST_LOG_SWEEP_TS=${NOW_TS}
         fi
     fi
     sleep 5

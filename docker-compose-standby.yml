@@ -32,10 +32,19 @@ services:
       - WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-true}
       - WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}
       - WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-true}
+      - HA_LOG_MAX_SIZE_MB=${HA_LOG_MAX_SIZE_MB:-20}
+      - HA_LOG_KEEP_FILES=${HA_LOG_KEEP_FILES:-5}
+      - HA_PG_LOG_KEEP_FILES=${HA_PG_LOG_KEEP_FILES:-10}
+      - HA_LOG_SWEEP_INTERVAL_SECS=${HA_LOG_SWEEP_INTERVAL_SECS:-60}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ${WAL_ARCHIVE_PATH:-./wal-archive}:/var/lib/postgresql/wal-archive
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "${DOCKER_LOG_MAX_SIZE:-20m}"
+        max-file: "${DOCKER_LOG_MAX_FILE:-5}"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -p ${PG_PORT:-5432}"]
       interval: 10s
