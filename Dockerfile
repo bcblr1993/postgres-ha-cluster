@@ -1,53 +1,13 @@
 ###############################################################################
 # PostgreSQL 15.4 + repmgr 5.4 + Keepalived 高可用镜像
 # 用途：双机热备，支持自动故障转移与手动主备切换
+# 说明：业务镜像基于 Dockerfile.base 产出的基础镜像构建
 ###############################################################################
-FROM postgres:15.4-bookworm
+ARG BASE_IMAGE=postgres-ha-base:15.4-bookworm
+FROM ${BASE_IMAGE}
 
 LABEL maintainer="postgres-ha-cluster"
 LABEL description="PostgreSQL 15.4 with repmgr and Keepalived for HA"
-
-# 设置环境变量，避免交互式安装提示
-ENV DEBIAN_FRONTEND=noninteractive
-
-# 替换为国内镜像源（阿里云 Debian 镜像加速）
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
-
-# 安装 repmgr、keepalived 及辅助工具
-RUN apt-get update -o Acquire::Retries=5 \
-    && apt-get install -y --fix-missing -o Acquire::Retries=5 --no-install-recommends \
-    # repmgr（从 PostgreSQL 官方仓库获取）
-    postgresql-15-repmgr \
-    # Keepalived - VRRP 虚拟 IP 管理
-    keepalived \
-    # 辅助工具
-    iputils-ping \
-    net-tools \
-    iproute2 \
-    sudo \
-    procps \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# --- 以下为新增层，以上层全部命中缓存 ---
-
-# 确保 PG 二进制在 PATH 中（su - postgres 时也生效）
-ENV PATH=/usr/lib/postgresql/15/bin:$PATH
-RUN echo 'export PATH=/usr/lib/postgresql/15/bin:$PATH' >> /var/lib/postgresql/.profile \
-    && chown postgres:postgres /var/lib/postgresql/.profile
-
-# 创建 repmgr 日志目录，预建 keepalived.log 并归属 postgres，
-# 否则首次由 root 启动 keepalived 会以 root 创建该文件，
-# 导致后续 postgres 用户的 repmgrd 事件钩子无权写入，Keepalived 无法启动
-RUN mkdir -p /var/log/repmgr \
-    && touch /var/log/repmgr/keepalived.log \
-    && chown -R postgres:postgres /var/log/repmgr
-
-# 创建 repmgr 配置目录
-RUN mkdir -p /etc/repmgr
-
-# 允许 postgres 用户执行 keepalived 相关命令（无密码 sudo）
-RUN echo "postgres ALL=(ALL) NOPASSWD: /usr/sbin/keepalived, /usr/bin/killall, /sbin/ip, /bin/kill" >> /etc/sudoers.d/postgres
 
 # 复制配置文件目录
 COPY conf/ /etc/pg-ha/conf/
