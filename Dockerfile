@@ -65,6 +65,7 @@ COPY scripts/restore-wal.sh /usr/local/bin/restore-wal.sh
 COPY scripts/wal-receiver-control.sh /usr/local/bin/wal-receiver-control.sh
 COPY scripts/archive-promote-wal.sh /usr/local/bin/archive-promote-wal.sh
 COPY scripts/log-maintenance.sh /usr/local/bin/log-maintenance.sh
+COPY scripts/wal-archive-maintenance.sh /usr/local/bin/wal-archive-maintenance.sh
 
 # 设置脚本可执行权限
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
@@ -78,7 +79,8 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
     /usr/local/bin/restore-wal.sh \
     /usr/local/bin/wal-receiver-control.sh \
     /usr/local/bin/archive-promote-wal.sh \
-    /usr/local/bin/log-maintenance.sh
+    /usr/local/bin/log-maintenance.sh \
+    /usr/local/bin/wal-archive-maintenance.sh
 
 # 暴露 PostgreSQL 端口
 EXPOSE 5432

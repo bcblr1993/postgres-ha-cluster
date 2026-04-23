@@ -23,6 +23,9 @@ export PGPORT=${PG_PORT:-5432}
 WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-"true"}
 WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-"/var/lib/postgresql/wal-archive"}
 WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-"true"}
+WAL_ARCHIVE_CLEANUP_ENABLED=${WAL_ARCHIVE_CLEANUP_ENABLED:-"true"}
+WAL_ARCHIVE_MAX_SIZE_MB=${WAL_ARCHIVE_MAX_SIZE_MB:-"10240"}
+WAL_ARCHIVE_MIN_KEEP_SEGMENTS=${WAL_ARCHIVE_MIN_KEEP_SEGMENTS:-"64"}
 HA_LOG_MAX_SIZE_MB=${HA_LOG_MAX_SIZE_MB:-20}
 HA_LOG_KEEP_FILES=${HA_LOG_KEEP_FILES:-5}
 HA_PG_LOG_KEEP_FILES=${HA_PG_LOG_KEEP_FILES:-10}
@@ -42,9 +45,11 @@ echo " 虚拟 IP: ${NODE_VIP}"
 echo " WAL 归档: ${WAL_ARCHIVE_ENABLED}"
 echo " WAL 目录: ${WAL_ARCHIVE_DIR}"
 echo " WAL 接收: ${WAL_RECEIVER_ENABLED}"
+echo " WAL 清理: ${WAL_ARCHIVE_CLEANUP_ENABLED}"
+echo " WAL 阈值: ${WAL_ARCHIVE_MAX_SIZE_MB}MB / 最少保留 ${WAL_ARCHIVE_MIN_KEEP_SEGMENTS} 段"
 echo " 日志轮转: ${HA_LOG_MAX_SIZE_MB}MB/${HA_LOG_KEEP_FILES}份"
 echo "============================================="
-ha_log_section "容器入口启动 role=${NODE_ROLE} node_id=${NODE_ID} node_name=${NODE_NAME} node_ip=${NODE_IP} partner_ip=${PARTNER_IP} vip=${NODE_VIP} pgport=${PGPORT} wal_archive_enabled=${WAL_ARCHIVE_ENABLED} wal_archive_dir=${WAL_ARCHIVE_DIR} wal_receiver_enabled=${WAL_RECEIVER_ENABLED} ha_log_max_size_mb=${HA_LOG_MAX_SIZE_MB} ha_log_keep_files=${HA_LOG_KEEP_FILES} ha_pg_log_keep_files=${HA_PG_LOG_KEEP_FILES} ha_log_sweep_interval_secs=${HA_LOG_SWEEP_INTERVAL_SECS}"
+ha_log_section "容器入口启动 role=${NODE_ROLE} node_id=${NODE_ID} node_name=${NODE_NAME} node_ip=${NODE_IP} partner_ip=${PARTNER_IP} vip=${NODE_VIP} pgport=${PGPORT} wal_archive_enabled=${WAL_ARCHIVE_ENABLED} wal_archive_dir=${WAL_ARCHIVE_DIR} wal_receiver_enabled=${WAL_RECEIVER_ENABLED} wal_archive_cleanup_enabled=${WAL_ARCHIVE_CLEANUP_ENABLED} wal_archive_max_size_mb=${WAL_ARCHIVE_MAX_SIZE_MB} wal_archive_min_keep_segments=${WAL_ARCHIVE_MIN_KEEP_SEGMENTS} ha_log_max_size_mb=${HA_LOG_MAX_SIZE_MB} ha_log_keep_files=${HA_LOG_KEEP_FILES} ha_pg_log_keep_files=${HA_PG_LOG_KEEP_FILES} ha_log_sweep_interval_secs=${HA_LOG_SWEEP_INTERVAL_SECS}"
 
 RUNTIME_ENV_FILE="/etc/pg-ha/runtime-notify.env"
 
@@ -64,6 +69,9 @@ write_runtime_env() {
         printf 'WAL_ARCHIVE_ENABLED=%q\n' "${WAL_ARCHIVE_ENABLED}"
         printf 'WAL_ARCHIVE_DIR=%q\n' "${WAL_ARCHIVE_DIR}"
         printf 'WAL_RECEIVER_ENABLED=%q\n' "${WAL_RECEIVER_ENABLED}"
+        printf 'WAL_ARCHIVE_CLEANUP_ENABLED=%q\n' "${WAL_ARCHIVE_CLEANUP_ENABLED}"
+        printf 'WAL_ARCHIVE_MAX_SIZE_MB=%q\n' "${WAL_ARCHIVE_MAX_SIZE_MB}"
+        printf 'WAL_ARCHIVE_MIN_KEEP_SEGMENTS=%q\n' "${WAL_ARCHIVE_MIN_KEEP_SEGMENTS}"
         printf 'HA_LOG_MAX_SIZE_MB=%q\n' "${HA_LOG_MAX_SIZE_MB}"
         printf 'HA_LOG_KEEP_FILES=%q\n' "${HA_LOG_KEEP_FILES}"
         printf 'HA_PG_LOG_KEEP_FILES=%q\n' "${HA_PG_LOG_KEEP_FILES}"

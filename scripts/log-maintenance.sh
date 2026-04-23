@@ -5,6 +5,7 @@
 #   1. 对 /var/log/repmgr 下的运行日志做按大小 copytruncate 轮转
 #   2. 清理 PGDATA/log 下历史 PostgreSQL 日志文件
 #   3. 控制 startup.log 等活跃日志体积，防止长期运行占满磁盘
+#   4. 在开启时，对 WAL 归档目录做保守的容量阈值清理
 # =============================================================================
 set -euo pipefail
 
@@ -100,7 +101,15 @@ maintain_pg_logs() {
     prune_matching_files "${pg_log_dir}" 'startup.log.[0-9]*' "${HA_LOG_KEEP_FILES}"
 }
 
+maintain_wal_archive() {
+    if [ -x /usr/local/bin/wal-archive-maintenance.sh ]; then
+        /usr/local/bin/wal-archive-maintenance.sh || \
+            ha_log_warn "wal_archive_maintenance_failed path=${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}"
+    fi
+}
+
 ha_log_info "log_maintenance_start max_size_mb=${HA_LOG_MAX_SIZE_MB} keep_files=${HA_LOG_KEEP_FILES} pg_keep_files=${HA_PG_LOG_KEEP_FILES}"
 maintain_repmgr_logs
 maintain_pg_logs
+maintain_wal_archive
 ha_log_info "log_maintenance_complete"
