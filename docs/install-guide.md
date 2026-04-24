@@ -79,10 +79,11 @@ WECOM_NOTIFY_SITE_NAME=xxxx现场
 WECOM_NOTIFY_TIMEOUT=10
 WECOM_NOTIFY_AT_ALL_ON_FAILOVER=false
 
-# WAL 归档 / 接收 / 自动清理（默认开启）
-WAL_ARCHIVE_ENABLED=true
-WAL_RECEIVER_ENABLED=true
-WAL_ARCHIVE_CLEANUP_ENABLED=true
+# WAL 归档 / 接收 / 自动清理（默认关闭）
+# 只有在两台机器能共享归档目录，或你另行提供了可靠的远端归档能力时，才建议开启
+WAL_ARCHIVE_ENABLED=false
+WAL_RECEIVER_ENABLED=false
+WAL_ARCHIVE_CLEANUP_ENABLED=false
 
 # WAL 归档宿主机目录（默认当前目录下隐藏目录 .wal）
 WAL_ARCHIVE_PATH=./.wal
@@ -103,7 +104,7 @@ PARTNER_IP=192.168.1.12
 >
 > 如果需要企业微信通知，请把 `WECOM_NOTIFY_ENABLED` 改为 `true`，并填写 `WECOM_WEBHOOK_URL` 和 `WECOM_NOTIFY_SITE_NAME`。
 >
-> 当前版本默认会在宿主机当前目录下使用隐藏目录 `./.wal` 保存 WAL 归档和 `pg_receivewal` 接收文件；自动清理是**按容量阈值**触发，不是按“保留几天”触发。
+> 当前版本默认会在宿主机当前目录下预留隐藏目录 `./.wal` 作为 WAL 归档目录，但默认**不启用**归档、接收和自动清理。只有在两台机器能共享这份目录，或你已经设计好远端归档链路时，才建议打开。
 
 ### 3.3 导入 Docker 镜像
 
@@ -500,7 +501,7 @@ docker logs --tail 200 postgres-ha
 ```
 
 **Q：WAL 归档默认放在哪里？会不会一直涨？**  
-A：默认放在交付包当前目录下的隐藏目录 `./.wal`，容器内路径仍然是 `/var/lib/postgresql/wal-archive`。当前版本默认开启归档、接收和自动清理，其中自动清理是**按容量阈值**执行，默认阈值是 `10240MB`，并至少保留 `64` 个完整 WAL 段。
+A：默认目录仍然是交付包当前目录下的隐藏目录 `./.wal`，容器内路径仍然是 `/var/lib/postgresql/wal-archive`，但当前版本默认**关闭**归档、接收和自动清理。如果你手工开启，自动清理会按容量阈值执行，默认阈值是 `10240MB`，并至少保留 `64` 个完整 WAL 段。
 
 **Q：这套方案会不会丢数据？哪些场景风险最高？**  
 A：不能简单理解成“绝对不会丢数据”。当前实现已经覆盖了自动故障切换、旧主自动回归、WAL 归档兜底和自动清理，能明显降低风险，但它仍不是对所有故障场景都承诺“零数据丢失”的架构。

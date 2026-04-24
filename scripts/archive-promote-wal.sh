@@ -4,7 +4,7 @@ set -euo pipefail
 . /usr/local/bin/ha-log.sh
 
 PGDATA=${PGDATA:-/var/lib/postgresql/data}
-WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-true}
+WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-false}
 WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}
 RUN_ID="archive-promote-wal-$(date +%s)-$$-${NODE_NAME:-unknown}"
 ha_log_init "archive-promote-wal" "${RUN_ID}"

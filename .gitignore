@@ -1,10 +1,21 @@
 # macOS
 .DS_Store
 
+# IDE / 本地临时文件
+.idea/
+.tmp-*/
+*.log
+
 # Docker 镜像包（体积过大，通过制品库分发）
 *.tar
 *.tar.gz
 *.zip
+
+# HA 测试报告和观测数据（由本地压测脚本生成）
+ha_*_report*.json
+ha_*_report*.md
+ha_*_observe_*.json
+ha_*_test_*.json
 
 # 本地 Claude 记忆目录
 .claude/

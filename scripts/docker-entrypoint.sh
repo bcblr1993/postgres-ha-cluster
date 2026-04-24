@@ -20,10 +20,10 @@ PGDATA=${PGDATA:-"/var/lib/postgresql/data"}
 REPMGR_PASSWORD=${REPMGR_PASSWORD:-"repmgr123"}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-"postgres123"}
 export PGPORT=${PG_PORT:-5432}
-WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-"true"}
+WAL_ARCHIVE_ENABLED=${WAL_ARCHIVE_ENABLED:-"false"}
 WAL_ARCHIVE_DIR=${WAL_ARCHIVE_DIR:-"/var/lib/postgresql/wal-archive"}
-WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-"true"}
-WAL_ARCHIVE_CLEANUP_ENABLED=${WAL_ARCHIVE_CLEANUP_ENABLED:-"true"}
+WAL_RECEIVER_ENABLED=${WAL_RECEIVER_ENABLED:-"false"}
+WAL_ARCHIVE_CLEANUP_ENABLED=${WAL_ARCHIVE_CLEANUP_ENABLED:-"false"}
 WAL_ARCHIVE_MAX_SIZE_MB=${WAL_ARCHIVE_MAX_SIZE_MB:-"10240"}
 WAL_ARCHIVE_MIN_KEEP_SEGMENTS=${WAL_ARCHIVE_MIN_KEEP_SEGMENTS:-"64"}
 HA_LOG_MAX_SIZE_MB=${HA_LOG_MAX_SIZE_MB:-20}
@@ -146,6 +146,12 @@ chmod 700 "${WAL_ARCHIVE_DIR}"
 ha_log_info "wal_archive_directory_ready path=${WAL_ARCHIVE_DIR} enabled=${WAL_ARCHIVE_ENABLED}"
 
 # ---------------------------------------------------------------------------
+# 两个节点都提前启动 Keepalived，由 track_script 决定是否具备持有 VIP 的资格。
+# 这样在 PostgreSQL 角色变化时，VRRP 能直接收敛，不必额外等待进程启动。
+# ---------------------------------------------------------------------------
+start_keepalived
+
+# ---------------------------------------------------------------------------
 # 根据角色执行初始化
 # ---------------------------------------------------------------------------
 if [ "${NODE_ROLE}" = "primary" ]; then
@@ -159,14 +165,7 @@ else
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# 仅 Primary 启动 Keepalived，避免 VIP 先于数据库角色漂移
-# ---------------------------------------------------------------------------
-if su - postgres -c "psql -tAc 'SELECT pg_is_in_recovery()'" 2>/dev/null | grep -q '^f$'; then
-    start_keepalived
-else
-    ha_log_info "skip_keepalived_start reason=node_not_primary"
-fi
+/usr/local/bin/vip-control.sh ensure || true
 
 # ---------------------------------------------------------------------------
 # 信号处理 - 优雅关闭

@@ -68,10 +68,10 @@ trigger_wecom_notify() {
 # 对关键事件输出到控制台
 case "${EVENT_TYPE}" in
     "standby_promote"|"repmgrd_failover_promote")
-        ha_log_warn "event_action promote keepalived=start"
+        ha_log_warn "event_action promote keepalived=managed_by_vrrp"
         /usr/local/bin/wal-receiver-control.sh stop || true
         /usr/local/bin/archive-promote-wal.sh || true
-        /usr/local/bin/keepalived-control.sh start || true
+        /usr/local/bin/vip-control.sh ensure || true
         if [ "${EVENT_TYPE}" = "standby_promote" ]; then
             trigger_wecom_notify "${WECOM_FLAG_DIR}/failover-promote-${NODE_ID}.flag" ""
         else
@@ -84,8 +84,8 @@ case "${EVENT_TYPE}" in
         echo "============================================="
         ;;
     "standby_follow"|"repmgrd_failover_follow")
-        ha_log_info "event_action follow keepalived=stop"
-        /usr/local/bin/keepalived-control.sh stop || true
+        ha_log_info "event_action follow keepalived=managed_by_vrrp"
+        /usr/local/bin/vip-control.sh remove || true
         /usr/local/bin/wal-receiver-control.sh start || true
         if [ "${EVENT_TYPE}" = "standby_follow" ]; then
             trigger_wecom_notify "${WECOM_FLAG_DIR}/failover-follow-${NODE_ID}.flag" ""

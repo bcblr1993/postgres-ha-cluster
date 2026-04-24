@@ -40,7 +40,7 @@ timed_postgres_cmd() {
 
 apply_runtime_postgres_config() {
     local target_conf="$1"
-    local archive_enabled="${WAL_ARCHIVE_ENABLED:-true}"
+    local archive_enabled="${WAL_ARCHIVE_ENABLED:-false}"
     local archive_dir="${WAL_ARCHIVE_DIR:-/var/lib/postgresql/wal-archive}"
 
     sed -i "s/port = 5432/port = ${PGPORT:-5432}/g" "${target_conf}"
