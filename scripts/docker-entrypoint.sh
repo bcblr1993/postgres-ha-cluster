@@ -17,6 +17,8 @@ NODE_IP=${NODE_IP:-"192.168.1.11"}        # 本节点 IP
 PARTNER_IP=${PARTNER_IP:-"192.168.1.12"}  # 对端节点 IP
 NODE_VIP=${NODE_VIP:-"192.168.1.100"}     # 虚拟 IP
 PGDATA=${PGDATA:-"/var/lib/postgresql/data"}
+HA_PGDATA_WORK_ROOT=${HA_PGDATA_WORK_ROOT:-}
+HA_RETAINED_PGDATA_DIR=${HA_RETAINED_PGDATA_DIR:-"/var/lib/postgresql/pg-ha-retained-before-clone"}
 REPMGR_PASSWORD=${REPMGR_PASSWORD:-"repmgr123"}
 POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-"postgres123"}
 export PGPORT=${PG_PORT:-5432}
@@ -30,6 +32,7 @@ HA_LOG_MAX_SIZE_MB=${HA_LOG_MAX_SIZE_MB:-20}
 HA_LOG_KEEP_FILES=${HA_LOG_KEEP_FILES:-5}
 HA_PG_LOG_KEEP_FILES=${HA_PG_LOG_KEEP_FILES:-10}
 HA_LOG_SWEEP_INTERVAL_SECS=${HA_LOG_SWEEP_INTERVAL_SECS:-60}
+export PGDATA HA_PGDATA_WORK_ROOT HA_RETAINED_PGDATA_DIR
 RUN_ID="entrypoint-$(date +%s)-$$-${NODE_NAME}"
 ha_log_init "docker-entrypoint" "${RUN_ID}"
 SCRIPT_START_TS=$(date +%s)
@@ -71,6 +74,8 @@ write_runtime_env() {
         printf 'HA_LOG_KEEP_FILES=%q\n' "${HA_LOG_KEEP_FILES}"
         printf 'HA_PG_LOG_KEEP_FILES=%q\n' "${HA_PG_LOG_KEEP_FILES}"
         printf 'HA_LOG_SWEEP_INTERVAL_SECS=%q\n' "${HA_LOG_SWEEP_INTERVAL_SECS}"
+        printf 'HA_PGDATA_WORK_ROOT=%q\n' "${HA_PGDATA_WORK_ROOT}"
+        printf 'HA_RETAINED_PGDATA_DIR=%q\n' "${HA_RETAINED_PGDATA_DIR}"
     } > "${RUNTIME_ENV_FILE}"
 }
 
@@ -124,26 +129,81 @@ stop_keepalived() {
 }
 
 move_retained_pgdata_dirs_outside_pgdata() {
-    local retained_base retained_node_dir retained_dir retained_name dest
-    retained_base="${HA_RETAINED_PGDATA_DIR:-/var/lib/postgresql/pg-ha-retained-before-clone}"
+    local retained_base retained_node_dir retained_dir retained_name dest replaced_dir stale_dir newest_dir
+    retained_base="${HA_RETAINED_PGDATA_DIR}"
     retained_node_dir="${retained_base}/${NODE_NAME}"
 
     mkdir -p "${PGDATA}" "${retained_node_dir}"
     chown postgres:postgres "${retained_base}" "${retained_node_dir}" 2>/dev/null || true
 
+    dest="${retained_node_dir}/latest"
+    if [ ! -e "${dest}" ]; then
+        newest_dir=$(ls -1dt "${retained_node_dir}"/.pg-ha-retained-before-clone-* 2>/dev/null | head -n 1 || true)
+        if [ -n "${newest_dir}" ] && [ -d "${newest_dir}" ]; then
+            mv "${newest_dir}" "${dest}"
+            ha_log_event "retained_pgdata_history_normalized node=${NODE_NAME} source=${newest_dir} target=${dest} policy=keep_latest_only"
+        fi
+    fi
+
+    for stale_dir in "${retained_node_dir}"/.pg-ha-retained-before-clone-* "${retained_node_dir}"/.pg-ha-retained-replaced-*; do
+        [ -e "${stale_dir}" ] || continue
+        rm -rf "${stale_dir}" >/dev/null 2>&1 &
+        ha_log_event "retained_pgdata_history_cleanup_started node=${NODE_NAME} path=${stale_dir} policy=keep_latest_only pid=$!"
+    done
+
     for retained_dir in "${PGDATA}"/.pg-ha-retained-before-clone-*; do
         [ -d "${retained_dir}" ] || continue
         retained_name=$(basename "${retained_dir}")
-        dest="${retained_node_dir}/${retained_name}"
+        dest="${retained_node_dir}/latest"
         if [ -e "${dest}" ]; then
-            dest="${retained_node_dir}/${retained_name}.$(date +%s)"
+            replaced_dir="${retained_node_dir}/.pg-ha-retained-replaced-entrypoint-$(date +%s)-$$"
+            mv "${dest}" "${replaced_dir}"
+            rm -rf "${replaced_dir}" >/dev/null 2>&1 &
+            ha_log_event "retained_pgdata_previous_cleanup_started node=${NODE_NAME} replaced_dir=${replaced_dir} source=${retained_dir} policy=keep_latest_only pid=$!"
         fi
 
         ha_log_warn "retained_pgdata_inside_active_pgdata_moving source=${retained_dir} target=${dest}"
         mv "${retained_dir}" "${dest}"
         chown -R postgres:postgres "${dest}" 2>/dev/null || true
-        ha_log_event "retained_pgdata_moved_outside_pgdata node=${NODE_NAME} source=${retained_dir} target=${dest}"
+        ha_log_event "retained_pgdata_moved_outside_pgdata node=${NODE_NAME} source=${retained_dir} target=${dest} original_name=${retained_name} policy=keep_latest_only"
     done
+}
+
+migrate_legacy_pgdata_root_if_needed() {
+    local work_root active_base retained_base migrated_count
+
+    work_root="${HA_PGDATA_WORK_ROOT:-}"
+    [ -n "${work_root}" ] || return 0
+    [ "${work_root}" != "${PGDATA}" ] || return 0
+
+    mkdir -p "${work_root}" "${PGDATA}"
+    chown postgres:postgres "${work_root}" "${PGDATA}" 2>/dev/null || true
+
+    if [ -s "${PGDATA}/PG_VERSION" ] || [ ! -s "${work_root}/PG_VERSION" ]; then
+        return 0
+    fi
+
+    active_base=$(basename "${PGDATA}")
+    retained_base=$(basename "${HA_RETAINED_PGDATA_DIR}")
+    ha_log_warn "legacy_pgdata_layout_detected work_root=${work_root} active_pgdata=${PGDATA} action=migrate_to_current"
+
+    migrated_count=$(find "${work_root}" -mindepth 1 -maxdepth 1 \
+        ! -name "${active_base}" \
+        ! -name "${retained_base}" \
+        ! -name '.pg-ha-clone-*' \
+        -print 2>/dev/null | wc -l | tr -d '[:space:]')
+
+    while IFS= read -r path; do
+        mv "${path}" "${PGDATA}/"
+    done < <(find "${work_root}" -mindepth 1 -maxdepth 1 \
+        ! -name "${active_base}" \
+        ! -name "${retained_base}" \
+        ! -name '.pg-ha-clone-*' \
+        -print)
+
+    chown postgres:postgres "${PGDATA}" 2>/dev/null || true
+    chmod 700 "${PGDATA}" 2>/dev/null || true
+    ha_log_event "legacy_pgdata_layout_migrated node=${NODE_NAME} work_root=${work_root} active_pgdata=${PGDATA} moved_items=${migrated_count:-0}"
 }
 
 # ---------------------------------------------------------------------------
@@ -154,8 +214,10 @@ cp /etc/pg-ha/conf/repmgr-node${NODE_ID}.conf /etc/repmgr.conf
 # 动态替换 conninfo 中的 IP 和端口
 sed -i "s|host=192.168.1.1[0-9]*|host=${NODE_IP}|g" /etc/repmgr.conf
 sed -i "s|connect_timeout=2|connect_timeout=2 port=${PGPORT}|g" /etc/repmgr.conf
+sed -i "s|^data_directory=.*|data_directory='${PGDATA}'|g" /etc/repmgr.conf
+sed -i "s|pg_ctl -D /var/lib/postgresql/data|pg_ctl -D ${PGDATA}|g" /etc/repmgr.conf
 chown postgres:postgres /etc/repmgr.conf
-ha_log_info "repmgr_config_ready node_ip=${NODE_IP} pgport=${PGPORT}"
+ha_log_info "repmgr_config_ready node_ip=${NODE_IP} pgport=${PGPORT} data_directory=${PGDATA}"
 
 ha_log_info "copy_keepalived_config source=/etc/pg-ha/conf/keepalived-node${NODE_ID}.conf target=/etc/keepalived/keepalived.conf"
 cp /etc/pg-ha/conf/keepalived-node${NODE_ID}.conf /etc/keepalived/keepalived.conf
@@ -187,6 +249,7 @@ chown postgres:postgres "${WAL_ARCHIVE_DIR}"
 chmod 700 "${WAL_ARCHIVE_DIR}"
 ha_log_info "wal_archive_directory_ready path=${WAL_ARCHIVE_DIR} enabled=${WAL_ARCHIVE_ENABLED}"
 
+migrate_legacy_pgdata_root_if_needed
 move_retained_pgdata_dirs_outside_pgdata
 
 start_focused_log_tail

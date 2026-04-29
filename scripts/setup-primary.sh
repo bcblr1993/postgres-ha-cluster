@@ -26,6 +26,21 @@ timing_log() {
     echo "[TIMING][${RUN_ID}] $*" >> "${TIMING_LOG}"
 }
 
+ensure_pgdata_permissions() {
+    local owner
+
+    mkdir -p "${PGDATA}"
+    owner=$(stat -c '%U:%G' "${PGDATA}" 2>/dev/null || true)
+    if [ "${owner}" != "postgres:postgres" ]; then
+        ha_log_warn "pgdata_ownership_recursive_fix_start pgdata=${PGDATA} owner=${owner:-unknown}"
+        chown -R postgres:postgres "${PGDATA}"
+        ha_log_warn "pgdata_ownership_recursive_fix_done pgdata=${PGDATA}"
+    else
+        chown postgres:postgres "${PGDATA}" 2>/dev/null || true
+    fi
+    chmod 700 "${PGDATA}"
+}
+
 timed_postgres_cmd() {
     local label="$1"
     local cmd="$2"
@@ -102,8 +117,7 @@ local_data_dir_looks_like_standby() {
 # 已有数据目录时，先识别本地真实角色，避免把只读 standby 当 primary 初始化
 if [ -s "${PGDATA}/PG_VERSION" ]; then
     ha_log_info "检查现有数据目录真实角色 pgdata=${PGDATA}"
-    chown -R postgres:postgres ${PGDATA}
-    chmod 700 ${PGDATA}
+    ensure_pgdata_permissions
 
     PRECHECK_START_TS=$(date +%s)
     if local_data_dir_looks_like_standby; then
@@ -127,8 +141,7 @@ fi
 # 步骤 0：修复数据目录权限（兼容 Bind Mount 模式）
 # ---------------------------------------------------------------------------
 ha_log_info "检查数据目录权限 pgdata=${PGDATA}"
-chown -R postgres:postgres ${PGDATA}
-chmod 700 ${PGDATA}
+ensure_pgdata_permissions
 
 # ---------------------------------------------------------------------------
 # 步骤 1：初始化 PostgreSQL 数据目录（如果为空）

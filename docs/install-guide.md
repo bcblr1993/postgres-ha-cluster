@@ -103,8 +103,10 @@ HA_LOG_SWEEP_INTERVAL_SECS=60
 DOCKER_LOG_MAX_SIZE=20m
 DOCKER_LOG_MAX_FILE=5
 
-# 全量 clone 后旧 PGDATA 的保留目录；compose 已挂载为独立数据卷，通常无需修改
-HA_RETAINED_PGDATA_DIR=/var/lib/postgresql/pg-ha-retained-before-clone
+# PGDATA 快速切换布局；通常无需修改
+PGDATA=/var/lib/postgresql/data/current
+HA_PGDATA_WORK_ROOT=/var/lib/postgresql/data
+HA_RETAINED_PGDATA_DIR=/var/lib/postgresql/data/pg-ha-retained-before-clone
 
 # 机器 1（主节点）的物理 IP
 NODE_IP=192.168.1.11
@@ -120,7 +122,7 @@ PARTNER_IP=192.168.1.12
 > 当前版本默认会在宿主机当前目录下预留隐藏目录 `./.wal` 作为 WAL 归档目录，但默认**不启用**归档、接收和自动清理。只有在两台机器能共享这份目录，或你已经设计好远端归档链路时，才建议打开。
 >
 > `TZ=Asia/Shanghai` 会让容器时间、PostgreSQL `timezone` / `log_timezone` 和 HA 脚本日志统一为东八区。
-> `HA_RETAINED_PGDATA_DIR` 用于保存全量 clone 成功后被替换下来的旧数据目录；交付包中的 `docker-compose.yml` 已将该路径挂载到独立 Docker volume，避免旧数据目录堆在容器临时层里。
+> `PGDATA`、`HA_PGDATA_WORK_ROOT` 和 `HA_RETAINED_PGDATA_DIR` 配合实现快速切换布局：正式数据在 `current`，全量 clone 临时目录和旧数据保留目录都在同一个 Docker 数据卷内，但不放进正式 `PGDATA`，这样 clone 成功后激活新数据主要是同卷移动，不需要跨数据卷复制旧库。
 
 ### 3.3 导入 Docker 镜像
 
@@ -307,13 +309,13 @@ VIP 自动漂移到新主节点
 
 当前版本的全量 clone 采用“两阶段”方式，重点是避免“clone 没完成就先清空原数据”的灾难场景：
 
-1. 先在当前 `PGDATA` 下创建临时目录 `.pg-ha-clone-*`。
+1. 先在 `HA_PGDATA_WORK_ROOT` 下创建临时目录 `.pg-ha-clone-*`，默认路径形如 `/var/lib/postgresql/data/.pg-ha-clone-*`。
 2. `repmgr standby clone` 只写入这个临时目录，不覆盖原来的有效数据目录。
 3. 如果 clone 失败，会保留原数据目录，并写入 `.pg-ha-clone-failed` 标记。
 4. 日志会输出 `standby_clone_interrupted_waiting_primary ... 当前备库全量克隆发生意外，正在等待主库启动`。
-5. 只有 clone 成功后，才会把旧 `PGDATA` 移动到 `HA_RETAINED_PGDATA_DIR`，再把新 clone 数据激活为正式 `PGDATA`。
+5. 只有 clone 成功后，才会把旧 `PGDATA` 移动到同一数据卷内的 `HA_RETAINED_PGDATA_DIR`，再把新 clone 数据激活为正式 `PGDATA`。
 
-因此，主库持续写入时全量 clone 会变慢，但失败时不会先清空原数据。需要注意的是，成功 clone 后保留下来的旧数据目录可能很大；确认集群稳定后，可以按现场保留策略清理 `pgdata_retained` 数据卷中的旧目录。
+因此，主库持续写入时全量 clone 本身仍然会变慢，但 clone 成功后的“旧数据保留 + 新数据激活”不会再因为跨 volume 搬迁而额外复制整库。当前只保留最近一次旧数据，目录固定为 `HA_RETAINED_PGDATA_DIR/<NODE_NAME>/latest`；下一次全量 clone 成功时会用新的旧数据替换它，历史保留目录会后台清理。
 
 ### 企业微信通知（可选）
 
@@ -595,7 +597,7 @@ A：分三种情况处理：
 
 2. 如果自动回归失败，但您确认另一侧已经是唯一主节点，可使用运维控制台选项 `10` 强制重建为 `standby`。
 
-3. 如果系统自动降级到全量 clone，当前版本会先 clone 到临时目录；clone 成功后才替换正式 `PGDATA`，并把旧数据目录保留到 `HA_RETAINED_PGDATA_DIR`。这种自动 clone 路径不需要先删除数据卷。
+3. 如果系统自动降级到全量 clone，当前版本会先 clone 到临时目录；clone 成功后才替换正式 `PGDATA`，并把旧数据目录保留到 `HA_RETAINED_PGDATA_DIR/<NODE_NAME>/latest`。这种自动 clone 路径不需要先删除数据卷，而且保留目录与正式 `PGDATA` 在同一个数据卷内，激活过程会比跨数据卷复制快得多。
 
 4. 如果您要手工执行“彻底重建”，步骤等价于：
 ```bash
@@ -612,7 +614,7 @@ docker-compose up -d
 ```
 > 手工删除 `pgdata` 数据卷会丢弃本机现有正式数据目录，只保留对端主节点上的数据，所以只能在您已经确认“另一侧是唯一正确主库”时使用。
 >
-> 如果您还想清理历史保留目录，可在确认不再需要旧数据后额外清理 `$(basename "$PWD")_pgdata_retained` 数据卷；不建议在故障判断阶段立即删除它。
+> 当前默认只保留最近一次旧数据。若需要手工清理，可在确认不再需要旧数据后进入容器删除 `HA_RETAINED_PGDATA_DIR/<NODE_NAME>/latest`；不建议在故障判断阶段立即删除它。
 
 执行强制重同步前，建议先多做两步确认：
 

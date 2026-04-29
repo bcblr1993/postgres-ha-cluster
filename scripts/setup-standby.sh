@@ -8,6 +8,7 @@ set -e
 . /usr/local/bin/ha-log.sh
 
 PGDATA=${PGDATA:-"/var/lib/postgresql/data"}
+HA_PGDATA_WORK_ROOT=${HA_PGDATA_WORK_ROOT:-${PGDATA}}
 PARTNER_IP=${PARTNER_IP:-"192.168.1.11"}
 MAX_WAIT=${MAX_WAIT:-120}
 REJOIN_VERIFY_TIMEOUT=${REJOIN_VERIFY_TIMEOUT:-30}
@@ -25,6 +26,21 @@ ha_log_init "setup-standby" "${RUN_ID}"
 timing_log() {
     ha_log_timing "$*"
     echo "[TIMING][${RUN_ID}] $*" >> "${TIMING_LOG}"
+}
+
+ensure_pgdata_permissions() {
+    local owner
+
+    mkdir -p "${PGDATA}"
+    owner=$(stat -c '%U:%G' "${PGDATA}" 2>/dev/null || true)
+    if [ "${owner}" != "postgres:postgres" ]; then
+        ha_log_warn "pgdata_ownership_recursive_fix_start pgdata=${PGDATA} owner=${owner:-unknown}"
+        chown -R postgres:postgres "${PGDATA}"
+        ha_log_warn "pgdata_ownership_recursive_fix_done pgdata=${PGDATA}"
+    else
+        chown postgres:postgres "${PGDATA}" 2>/dev/null || true
+    fi
+    chmod 700 "${PGDATA}"
 }
 
 timed_postgres_cmd() {
@@ -236,16 +252,22 @@ clear_clone_failure_marker() {
 }
 
 cleanup_stale_clone_workdirs() {
-    find "${PGDATA}" -mindepth 1 -maxdepth 1 -type d -name '.pg-ha-clone-*' \
-        -exec rm -rf {} + 2>/dev/null || true
+    local root
+    for root in "${PGDATA}" "${HA_PGDATA_WORK_ROOT}"; do
+        [ -d "${root}" ] || continue
+        find "${root}" -mindepth 1 -maxdepth 1 -type d -name '.pg-ha-clone-*' \
+            -exec rm -rf {} + 2>/dev/null || true
+    done
 }
 
 prepare_clone_workdir() {
     local clone_dir="$1"
 
     mkdir -p "${PGDATA}"
+    mkdir -p "${HA_PGDATA_WORK_ROOT}"
     chmod 700 "${PGDATA}"
-    chown postgres:postgres "${PGDATA}"
+    chmod 700 "${HA_PGDATA_WORK_ROOT}" 2>/dev/null || true
+    chown postgres:postgres "${PGDATA}" "${HA_PGDATA_WORK_ROOT}" 2>/dev/null || true
 
     cleanup_stale_clone_workdirs
     mkdir -p "${clone_dir}"
@@ -265,6 +287,40 @@ prepare_clone_repmgr_config() {
     ha_log_info "standby_clone_repmgr_config_ready clone_conf=${clone_conf} clone_dir=${clone_dir}"
 }
 
+cleanup_retained_path_async() {
+    local path="$1"
+    local reason="$2"
+
+    [ -e "${path}" ] || return 0
+    rm -rf "${path}" >/dev/null 2>&1 &
+    ha_log_event "standby_clone_retained_cleanup_started node=${NODE_NAME:-unknown} path=${path} reason=${reason} pid=$!"
+}
+
+prepare_single_retained_pgdata_dir() {
+    local retained_dir="$1"
+    local retained_base replaced_dir old_dir
+
+    retained_base=$(dirname "${retained_dir}")
+    mkdir -p "${retained_base}"
+    chmod 700 "${retained_base}"
+    chown postgres:postgres "${retained_base}"
+
+    if [ -e "${retained_dir}" ]; then
+        replaced_dir="${retained_base}/.pg-ha-retained-replaced-${RUN_ID}"
+        if [ -e "${replaced_dir}" ]; then
+            replaced_dir="${replaced_dir}.$(date +%s)"
+        fi
+        mv "${retained_dir}" "${replaced_dir}"
+        ha_log_event "standby_clone_previous_retained_replaced node=${NODE_NAME:-unknown} old_retained_dir=${retained_dir} cleanup_dir=${replaced_dir} policy=keep_latest_only"
+        cleanup_retained_path_async "${replaced_dir}" "replaced_by_new_clone"
+    fi
+
+    for old_dir in "${retained_base}"/.pg-ha-retained-before-clone-* "${retained_base}"/.pg-ha-retained-replaced-*; do
+        [ -e "${old_dir}" ] || continue
+        cleanup_retained_path_async "${old_dir}" "cleanup_old_retained_history"
+    done
+}
+
 activate_cloned_pgdata() {
     local clone_dir="$1"
     local backup_dir="$2"
@@ -281,6 +337,7 @@ activate_cloned_pgdata() {
     ha_log_event "standby_clone_activate_start node=${NODE_NAME:-unknown} clone_dir=${clone_dir} active_items=${active_count:-0}"
 
     if [ "${active_count:-0}" -gt 0 ]; then
+        prepare_single_retained_pgdata_dir "${backup_dir}"
         mkdir -p "${backup_dir}"
         chmod 700 "${backup_dir}"
         chown postgres:postgres "${backup_dir}"
@@ -302,7 +359,7 @@ activate_cloned_pgdata() {
     done < <(find "${clone_dir}" -mindepth 1 -maxdepth 1 -print)
     rmdir "${clone_dir}" 2>/dev/null || true
 
-    chown -R postgres:postgres "${PGDATA}"
+    chown postgres:postgres "${PGDATA}"
     chmod 700 "${PGDATA}"
     ha_log_event "standby_clone_activated node=${NODE_NAME:-unknown} pgdata=${PGDATA} retained_old_data=$([ "${active_count:-0}" -gt 0 ] && printf '%s' "${backup_dir}" || printf 'none')"
 }
@@ -365,8 +422,7 @@ ensure_clean_shutdown_for_rejoin() {
 # 步骤 0：优先识别本地数据目录角色，兼容双节点同时断电后的恢复
 # ---------------------------------------------------------------------------
 ha_log_info "检查数据目录权限 pgdata=${PGDATA}"
-chown -R postgres:postgres ${PGDATA}
-chmod 700 ${PGDATA}
+ensure_pgdata_permissions
 
 if [ -s "${PGDATA}/PG_VERSION" ]; then
     ha_log_info "预检查本地数据目录角色"
@@ -557,9 +613,9 @@ fi
 if [ "${goto_register}" != "true" ]; then
     ha_log_info "从 Primary 克隆数据 partner=${PARTNER_IP}"
     CLONE_START_TS=$(date +%s)
-    CLONE_WORK_DIR="${PGDATA}/.pg-ha-clone-${RUN_ID}"
+    CLONE_WORK_DIR="${HA_PGDATA_WORK_ROOT}/.pg-ha-clone-${RUN_ID}"
     CLONE_RETAINED_BASE="${HA_RETAINED_PGDATA_DIR:-/var/lib/postgresql/pg-ha-retained-before-clone}/${NODE_NAME:-unknown}"
-    CLONE_RETAINED_DIR="${CLONE_RETAINED_BASE}/.pg-ha-retained-before-clone-${RUN_ID}"
+    CLONE_RETAINED_DIR="${CLONE_RETAINED_BASE}/latest"
     CLONE_REPMGR_CONF="/tmp/repmgr-clone-${RUN_ID}.conf"
     ha_log_event "standby_clone_start node=${NODE_NAME:-unknown} source_primary=${PARTNER_IP} target_pgdata=${PGDATA} mode=safe_two_phase"
     ha_log_ha_snapshot "standby_before_clone"

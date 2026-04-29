@@ -31,7 +31,7 @@ services:
       - NODE_VIP=172.40.0.100
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-JvUcMbDxjYY4M8sj}
       - POSTGRES_DB=${POSTGRES_DB:-thingsboard}
-      - PGDATA=/var/lib/postgresql/data
+      - PGDATA=/var/lib/postgresql/data/current
       - PG_PORT=${PG_PORT:-5432}
       - WECOM_NOTIFY_ENABLED=${WECOM_NOTIFY_ENABLED:-false}
       - WECOM_WEBHOOK_URL=${WECOM_WEBHOOK_URL:-}
@@ -49,10 +49,10 @@ services:
       - HA_LOG_KEEP_FILES=${HA_LOG_KEEP_FILES:-5}
       - HA_PG_LOG_KEEP_FILES=${HA_PG_LOG_KEEP_FILES:-10}
       - HA_LOG_SWEEP_INTERVAL_SECS=${HA_LOG_SWEEP_INTERVAL_SECS:-60}
-      - HA_RETAINED_PGDATA_DIR=${HA_RETAINED_PGDATA_DIR:-/var/lib/postgresql/pg-ha-retained-before-clone}
+      - HA_PGDATA_WORK_ROOT=${HA_PGDATA_WORK_ROOT:-/var/lib/postgresql/data}
+      - HA_RETAINED_PGDATA_DIR=${HA_RETAINED_PGDATA_DIR:-/var/lib/postgresql/data/pg-ha-retained-before-clone}
     volumes:
       - pgdata_node1:/var/lib/postgresql/data
-      - pgdata_retained_node1:/var/lib/postgresql/pg-ha-retained-before-clone
       - wal_archive:/var/lib/postgresql/wal-archive
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
@@ -88,7 +88,7 @@ services:
       - NODE_VIP=172.40.0.100
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-JvUcMbDxjYY4M8sj}
       - POSTGRES_DB=${POSTGRES_DB:-thingsboard}
-      - PGDATA=/var/lib/postgresql/data
+      - PGDATA=/var/lib/postgresql/data/current
       - PG_PORT=${PG_PORT:-5432}
       - WECOM_NOTIFY_ENABLED=${WECOM_NOTIFY_ENABLED:-false}
       - WECOM_WEBHOOK_URL=${WECOM_WEBHOOK_URL:-}
@@ -106,10 +106,10 @@ services:
       - HA_LOG_KEEP_FILES=${HA_LOG_KEEP_FILES:-5}
       - HA_PG_LOG_KEEP_FILES=${HA_PG_LOG_KEEP_FILES:-10}
       - HA_LOG_SWEEP_INTERVAL_SECS=${HA_LOG_SWEEP_INTERVAL_SECS:-60}
-      - HA_RETAINED_PGDATA_DIR=${HA_RETAINED_PGDATA_DIR:-/var/lib/postgresql/pg-ha-retained-before-clone}
+      - HA_PGDATA_WORK_ROOT=${HA_PGDATA_WORK_ROOT:-/var/lib/postgresql/data}
+      - HA_RETAINED_PGDATA_DIR=${HA_RETAINED_PGDATA_DIR:-/var/lib/postgresql/data/pg-ha-retained-before-clone}
     volumes:
       - pgdata_node2:/var/lib/postgresql/data
-      - pgdata_retained_node2:/var/lib/postgresql/pg-ha-retained-before-clone
       - wal_archive:/var/lib/postgresql/wal-archive
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
@@ -132,10 +132,6 @@ volumes:
   pgdata_node1:
     driver: local
   pgdata_node2:
-    driver: local
-  pgdata_retained_node1:
-    driver: local
-  pgdata_retained_node2:
     driver: local
   wal_archive:
     driver: local
