@@ -33,23 +33,17 @@ HA_LOG_SWEEP_INTERVAL_SECS=${HA_LOG_SWEEP_INTERVAL_SECS:-60}
 RUN_ID="entrypoint-$(date +%s)-$$-${NODE_NAME}"
 ha_log_init "docker-entrypoint" "${RUN_ID}"
 SCRIPT_START_TS=$(date +%s)
+FOCUSED_LOG_TAIL_PID=""
 
 echo "============================================="
 echo " PostgreSQL HA 节点启动"
-echo " 角色: ${NODE_ROLE}"
-echo " 节点 ID: ${NODE_ID}"
-echo " 节点名称: ${NODE_NAME}"
-echo " 本机 IP: ${NODE_IP}"
-echo " 对端 IP: ${PARTNER_IP}"
-echo " 虚拟 IP: ${NODE_VIP}"
-echo " WAL 归档: ${WAL_ARCHIVE_ENABLED}"
-echo " WAL 目录: ${WAL_ARCHIVE_DIR}"
-echo " WAL 接收: ${WAL_RECEIVER_ENABLED}"
-echo " WAL 清理: ${WAL_ARCHIVE_CLEANUP_ENABLED}"
-echo " WAL 阈值: ${WAL_ARCHIVE_MAX_SIZE_MB}MB / 最少保留 ${WAL_ARCHIVE_MIN_KEEP_SEGMENTS} 段"
-echo " 日志轮转: ${HA_LOG_MAX_SIZE_MB}MB/${HA_LOG_KEEP_FILES}份"
+echo " 节点: ${NODE_NAME}(${NODE_ID})"
+echo " 配置角色: ${NODE_ROLE}"
+echo " 本机/对端/VIP: ${NODE_IP} / ${PARTNER_IP} / ${NODE_VIP}"
+echo " PG 端口: ${PGPORT}"
 echo "============================================="
-ha_log_section "容器入口启动 role=${NODE_ROLE} node_id=${NODE_ID} node_name=${NODE_NAME} node_ip=${NODE_IP} partner_ip=${PARTNER_IP} vip=${NODE_VIP} pgport=${PGPORT} wal_archive_enabled=${WAL_ARCHIVE_ENABLED} wal_archive_dir=${WAL_ARCHIVE_DIR} wal_receiver_enabled=${WAL_RECEIVER_ENABLED} wal_archive_cleanup_enabled=${WAL_ARCHIVE_CLEANUP_ENABLED} wal_archive_max_size_mb=${WAL_ARCHIVE_MAX_SIZE_MB} wal_archive_min_keep_segments=${WAL_ARCHIVE_MIN_KEEP_SEGMENTS} ha_log_max_size_mb=${HA_LOG_MAX_SIZE_MB} ha_log_keep_files=${HA_LOG_KEEP_FILES} ha_pg_log_keep_files=${HA_PG_LOG_KEEP_FILES} ha_log_sweep_interval_secs=${HA_LOG_SWEEP_INTERVAL_SECS}"
+ha_log_section "容器入口启动 role=${NODE_ROLE} node_id=${NODE_ID} node_name=${NODE_NAME} node_ip=${NODE_IP} partner_ip=${PARTNER_IP} vip=${NODE_VIP} pgport=${PGPORT}"
+ha_log_event "ha_node_start node=${NODE_NAME} configured_role=${NODE_ROLE} node_ip=${NODE_IP} partner_ip=${PARTNER_IP} vip=${NODE_VIP} pgport=${PGPORT}"
 
 RUNTIME_ENV_FILE="/etc/pg-ha/runtime-notify.env"
 
@@ -65,6 +59,7 @@ write_runtime_env() {
         printf 'WECOM_NOTIFY_SITE_NAME=%q\n' "${WECOM_NOTIFY_SITE_NAME:-PostgreSQL HA 现场}"
         printf 'WECOM_NOTIFY_TIMEOUT=%q\n' "${WECOM_NOTIFY_TIMEOUT:-10}"
         printf 'WECOM_NOTIFY_AT_ALL_ON_FAILOVER=%q\n' "${WECOM_NOTIFY_AT_ALL_ON_FAILOVER:-false}"
+        printf 'export TZ=%q\n' "${TZ:-Asia/Shanghai}"
         printf 'REPMGR_PASSWORD=%q\n' "${REPMGR_PASSWORD}"
         printf 'WAL_ARCHIVE_ENABLED=%q\n' "${WAL_ARCHIVE_ENABLED}"
         printf 'WAL_ARCHIVE_DIR=%q\n' "${WAL_ARCHIVE_DIR}"
@@ -84,6 +79,23 @@ chmod 644 "${RUNTIME_ENV_FILE}"
 ha_log_info "runtime_notify_env_written path=${RUNTIME_ENV_FILE}"
 
 # ---------------------------------------------------------------------------
+# repmgrd 以 postgres 用户触发事件钩子时不能直接写 Docker stdout。
+# 这里只转发关键事件行，保证 docker logs 能看到切换/通知链路，同时避免 SQL 快照刷屏。
+# ---------------------------------------------------------------------------
+start_focused_log_tail() {
+    local event_log="/var/log/repmgr/repmgr-event-hook.log"
+    local wecom_log="/var/log/repmgr/wecom-notify.log"
+
+    touch "${event_log}" "${wecom_log}"
+    chown postgres:postgres "${event_log}" "${wecom_log}" 2>/dev/null || true
+
+    tail -n 0 -F "${event_log}" "${wecom_log}" 2>/dev/null | \
+        awk '/\[EVENT\]|\[WARN\]|\[ERROR\]/ { print; fflush(); }' &
+    FOCUSED_LOG_TAIL_PID=$!
+    ha_log_info "focused_log_tail_started pid=${FOCUSED_LOG_TAIL_PID} files=${event_log},${wecom_log}"
+}
+
+# ---------------------------------------------------------------------------
 # Keepalived 控制函数
 # ---------------------------------------------------------------------------
 start_keepalived() {
@@ -94,14 +106,44 @@ start_keepalived() {
     fi
 
     ha_log_info "keepalived_start_requested"
-    /usr/local/bin/keepalived-control.sh start
-    KEEPALIVED_PID=$(cat /var/run/keepalived.pid 2>/dev/null || true)
-    ha_log_info "keepalived_started pid=${KEEPALIVED_PID:-unknown}"
+    if /usr/local/bin/keepalived-control.sh start; then
+        KEEPALIVED_PID=$(cat /var/run/keepalived.pid 2>/dev/null || true)
+        ha_log_info "keepalived_started pid=${KEEPALIVED_PID:-unknown}"
+        ha_log_event "keepalived_started node=${NODE_NAME} pid=${KEEPALIVED_PID:-unknown}"
+    else
+        KEEPALIVED_RC=$?
+        ha_log_warn "keepalived_start_failed_nonfatal node=${NODE_NAME} exit_code=${KEEPALIVED_RC} action=continue_postgres_start"
+        ha_log_event "keepalived_unavailable node=${NODE_NAME} exit_code=${KEEPALIVED_RC} action=continue_postgres_start"
+        return 0
+    fi
 }
 
 stop_keepalived() {
     ha_log_info "keepalived_stop_requested"
     /usr/local/bin/keepalived-control.sh stop || true
+}
+
+move_retained_pgdata_dirs_outside_pgdata() {
+    local retained_base retained_node_dir retained_dir retained_name dest
+    retained_base="${HA_RETAINED_PGDATA_DIR:-/var/lib/postgresql/pg-ha-retained-before-clone}"
+    retained_node_dir="${retained_base}/${NODE_NAME}"
+
+    mkdir -p "${PGDATA}" "${retained_node_dir}"
+    chown postgres:postgres "${retained_base}" "${retained_node_dir}" 2>/dev/null || true
+
+    for retained_dir in "${PGDATA}"/.pg-ha-retained-before-clone-*; do
+        [ -d "${retained_dir}" ] || continue
+        retained_name=$(basename "${retained_dir}")
+        dest="${retained_node_dir}/${retained_name}"
+        if [ -e "${dest}" ]; then
+            dest="${retained_node_dir}/${retained_name}.$(date +%s)"
+        fi
+
+        ha_log_warn "retained_pgdata_inside_active_pgdata_moving source=${retained_dir} target=${dest}"
+        mv "${retained_dir}" "${dest}"
+        chown -R postgres:postgres "${dest}" 2>/dev/null || true
+        ha_log_event "retained_pgdata_moved_outside_pgdata node=${NODE_NAME} source=${retained_dir} target=${dest}"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -145,6 +187,10 @@ chown postgres:postgres "${WAL_ARCHIVE_DIR}"
 chmod 700 "${WAL_ARCHIVE_DIR}"
 ha_log_info "wal_archive_directory_ready path=${WAL_ARCHIVE_DIR} enabled=${WAL_ARCHIVE_ENABLED}"
 
+move_retained_pgdata_dirs_outside_pgdata
+
+start_focused_log_tail
+
 # ---------------------------------------------------------------------------
 # 两个节点都提前启动 Keepalived，由 track_script 决定是否具备持有 VIP 的资格。
 # 这样在 PostgreSQL 角色变化时，VRRP 能直接收敛，不必额外等待进程启动。
@@ -166,12 +212,17 @@ else
 fi
 
 /usr/local/bin/vip-control.sh ensure || true
+ha_log_ha_snapshot "entrypoint_after_setup"
 
 # ---------------------------------------------------------------------------
 # 信号处理 - 优雅关闭
 # ---------------------------------------------------------------------------
 cleanup() {
     ha_log_warn "signal_received action=cleanup"
+
+    if [ -n "${FOCUSED_LOG_TAIL_PID}" ]; then
+        kill "${FOCUSED_LOG_TAIL_PID}" 2>/dev/null || true
+    fi
 
     # 停止 Keepalived
     stop_keepalived
@@ -196,6 +247,7 @@ trap cleanup SIGTERM SIGINT SIGQUIT
 # 前台等待（保持容器运行）
 # ---------------------------------------------------------------------------
 ha_log_info "services_ready wait_loop=enabled total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s"
+ha_log_event "ha_node_available node=${NODE_NAME} configured_role=${NODE_ROLE} total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s"
 echo "============================================="
 echo " PostgreSQL HA 节点就绪"
 echo " 角色: ${NODE_ROLE}"
@@ -205,6 +257,34 @@ echo "============================================="
 # 持续监控子进程，任一退出则重启
 MAIN_LOOP_LAST_PG_STATE="ready"
 LAST_LOG_SWEEP_TS=0
+HA_RUNTIME_STATE_FILE="/tmp/ha-runtime.state"
+
+build_ha_runtime_state() {
+    local pg_state role wal_receiver vip_present keepalived_state
+    pg_state="unready"
+    role="unknown"
+    wal_receiver="none"
+    vip_present="no"
+    keepalived_state="stopped"
+
+    if su - postgres -c "pg_isready -q" 2>/dev/null; then
+        pg_state="ready"
+        role=$(su - postgres -c "psql -p ${PGPORT} -tAc \"SELECT CASE WHEN pg_is_in_recovery() THEN 'standby' ELSE 'primary' END\"" 2>/dev/null | tr -d '[:space:]' || true)
+        wal_receiver=$(su - postgres -c "psql -p ${PGPORT} -tAc \"SELECT COALESCE(MAX(status), 'none') FROM pg_stat_wal_receiver\"" 2>/dev/null | tr -d '[:space:]' || true)
+    fi
+
+    if [ -n "${NODE_VIP}" ] && ip addr show 2>/dev/null | grep -qw "${NODE_VIP}"; then
+        vip_present="yes"
+    fi
+
+    if pgrep -x keepalived >/dev/null 2>&1; then
+        keepalived_state="running"
+    fi
+
+    printf 'pg=%s role=%s wal_receiver=%s vip=%s keepalived=%s' \
+        "${pg_state}" "${role:-unknown}" "${wal_receiver:-none}" "${vip_present}" "${keepalived_state}"
+}
+
 while true; do
     # 检查 PostgreSQL 是否存活
     if ! su - postgres -c "pg_isready -q" 2>/dev/null; then
@@ -227,5 +307,12 @@ while true; do
             LAST_LOG_SWEEP_TS=${NOW_TS}
         fi
     fi
+
+    CURRENT_HA_STATE=$(build_ha_runtime_state)
+    if ha_log_state_change "${HA_RUNTIME_STATE_FILE}" "ha_runtime_state_change" "${CURRENT_HA_STATE}"; then
+        ha_log_event "ha_state_change node=${NODE_NAME} ${CURRENT_HA_STATE}"
+        ha_log_ha_snapshot "entrypoint_state_change"
+    fi
+
     sleep 5
 done

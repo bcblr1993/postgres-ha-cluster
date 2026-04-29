@@ -68,6 +68,7 @@ start_receiver() {
     if is_running; then
         ha_log_info "wal_receiver_started pid=$(cat "${PID_FILE}") slot=${WAL_RECEIVER_SLOT_NAME}"
         log_archive_snapshot
+        ha_log_ha_snapshot "wal_receiver_after_start"
         ha_log_tail_file "INFO" "wal_receiver_start_tail" "${LOG_FILE}" 20 || true
         return 0
     fi
@@ -89,6 +90,7 @@ stop_receiver() {
     pkill -f "pg_receivewal.*${WAL_RECEIVER_SLOT_NAME}" 2>/dev/null || true
     ha_log_info "wal_receiver_stopped slot=${WAL_RECEIVER_SLOT_NAME}"
     log_archive_snapshot
+    ha_log_ha_snapshot "wal_receiver_after_stop"
 }
 
 case "${1:-}" in

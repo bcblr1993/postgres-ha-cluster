@@ -29,6 +29,30 @@ detect_interface() {
     ip -o addr show | awk -v node_ip="${NODE_IP}" '$4 ~ "^" node_ip "/" {print $2; exit}'
 }
 
+vip_present_on_interface() {
+    local iface="$1"
+    [ -n "${iface}" ] && ip -o addr show dev "${iface}" 2>/dev/null | grep -qw "${NODE_VIP}"
+}
+
+log_vip_detail() {
+    local label="$1"
+    local iface="${2:-}"
+    local present="no"
+
+    if [ -n "${iface}" ] && vip_present_on_interface "${iface}"; then
+        present="yes"
+    elif [ -n "${NODE_VIP}" ] && ip addr show 2>/dev/null | grep -qw "${NODE_VIP}"; then
+        present="yes"
+    fi
+
+    ha_log_info "${label} vip=${NODE_VIP:-unset} cidr=${VIP_CIDR:-unset} node_ip=${NODE_IP:-unset} interface=${iface:-unknown} vip_present=${present}"
+    if [ -n "${iface}" ]; then
+        ha_log_capture_allow_fail "INFO" "${label}_addr" "ip -o addr show dev '${iface}'" || true
+    else
+        ha_log_capture_allow_fail "INFO" "${label}_addr" "ip -o addr show | grep -E '${NODE_VIP:-__no_vip__}|${NODE_IP:-__no_node_ip__}'" || true
+    fi
+}
+
 ensure_primary() {
     if ! pg_isready -q -p "${PGPORT}" 2>/dev/null; then
         ha_log_warn "vip_ensure_skipped reason=postgres_unready"
@@ -36,7 +60,7 @@ ensure_primary() {
     fi
 
     if ! su - postgres -c "psql -p ${PGPORT} -tAc \"SELECT NOT pg_is_in_recovery()\"" 2>/dev/null | grep -q '^t$'; then
-        ha_log_warn "vip_ensure_skipped reason=node_not_primary"
+        ha_log_info "vip_ensure_skipped reason=node_not_primary"
         return 1
     fi
 
@@ -45,6 +69,8 @@ ensure_primary() {
 
 ensure_vip() {
     local iface
+
+    ha_log_info "vip_ensure_requested vip=${NODE_VIP:-unset} cidr=${VIP_CIDR:-unset} node_ip=${NODE_IP:-unset}"
 
     if [ -z "${NODE_VIP}" ] || [ -z "${NODE_IP}" ]; then
         ha_log_error "vip_ensure_failed reason=missing_runtime_env node_ip=${NODE_IP:-unset} vip=${NODE_VIP:-unset}"
@@ -59,24 +85,36 @@ ensure_vip() {
         return 1
     fi
 
-    if ip -o addr show dev "${iface}" 2>/dev/null | grep -qw "${NODE_VIP}"; then
+    log_vip_detail "vip_ensure_before" "${iface}"
+
+    if vip_present_on_interface "${iface}"; then
         ha_log_info "vip_already_present vip=${NODE_VIP} interface=${iface}"
+        ha_log_event "vip_present node=${NODE_NAME:-unknown} vip=${NODE_VIP} interface=${iface} action=already_present"
+        ha_log_event "service_available node=${NODE_NAME:-unknown} role=primary vip=${NODE_VIP} interface=${iface}"
+        log_vip_detail "vip_ensure_after" "${iface}"
         return 0
     fi
 
+    ha_log_info "vip_add_command vip=${NODE_VIP} cidr=${VIP_CIDR} interface=${iface}"
     run_as_root /sbin/ip addr add "${VIP_CIDR}" dev "${iface}" || true
 
-    if ip -o addr show dev "${iface}" 2>/dev/null | grep -qw "${NODE_VIP}"; then
+    if vip_present_on_interface "${iface}"; then
         ha_log_info "vip_added vip=${NODE_VIP} cidr=${VIP_CIDR} interface=${iface}"
+        ha_log_event "vip_present node=${NODE_NAME:-unknown} vip=${NODE_VIP} cidr=${VIP_CIDR} interface=${iface} action=added"
+        ha_log_event "service_available node=${NODE_NAME:-unknown} role=primary vip=${NODE_VIP} interface=${iface}"
+        log_vip_detail "vip_ensure_after" "${iface}"
         return 0
     fi
 
+    log_vip_detail "vip_ensure_after" "${iface}"
     ha_log_error "vip_ensure_failed reason=vip_not_visible_after_add vip=${NODE_VIP} interface=${iface}"
     return 1
 }
 
 remove_vip() {
     local iface
+
+    ha_log_info "vip_remove_requested vip=${NODE_VIP:-unset} cidr=${VIP_CIDR:-unset} node_ip=${NODE_IP:-unset}"
 
     if [ -z "${NODE_VIP}" ] || [ -z "${NODE_IP}" ]; then
         ha_log_warn "vip_remove_skipped reason=missing_runtime_env"
@@ -89,19 +127,26 @@ remove_vip() {
         return 0
     fi
 
-    if ! ip -o addr show dev "${iface}" 2>/dev/null | grep -qw "${NODE_VIP}"; then
+    log_vip_detail "vip_remove_before" "${iface}"
+
+    if ! vip_present_on_interface "${iface}"; then
         ha_log_info "vip_absent vip=${NODE_VIP} interface=${iface}"
+        log_vip_detail "vip_remove_after" "${iface}"
         return 0
     fi
 
+    ha_log_info "vip_del_command vip=${NODE_VIP} cidr=${VIP_CIDR} interface=${iface}"
     run_as_root /sbin/ip addr del "${VIP_CIDR}" dev "${iface}" || true
 
-    if ip -o addr show dev "${iface}" 2>/dev/null | grep -qw "${NODE_VIP}"; then
+    if vip_present_on_interface "${iface}"; then
         ha_log_warn "vip_remove_incomplete vip=${NODE_VIP} interface=${iface}"
+        log_vip_detail "vip_remove_after" "${iface}"
         return 1
     fi
 
     ha_log_info "vip_removed vip=${NODE_VIP} interface=${iface}"
+    ha_log_event "vip_absent node=${NODE_NAME:-unknown} vip=${NODE_VIP} interface=${iface} action=removed"
+    log_vip_detail "vip_remove_after" "${iface}"
     return 0
 }
 

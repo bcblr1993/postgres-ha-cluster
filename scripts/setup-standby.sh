@@ -11,6 +11,7 @@ PGDATA=${PGDATA:-"/var/lib/postgresql/data"}
 PARTNER_IP=${PARTNER_IP:-"192.168.1.11"}
 MAX_WAIT=${MAX_WAIT:-120}
 REJOIN_VERIFY_TIMEOUT=${REJOIN_VERIFY_TIMEOUT:-30}
+CLONE_FAILURE_MARKER="${PGDATA}/.pg-ha-clone-failed"
 REJOIN_REASON=""
 LOCAL_DATA_ROLE_HINT=""
 goto_register=false
@@ -36,6 +37,24 @@ timed_postgres_cmd() {
     end_ts=$(date +%s)
     elapsed=$((end_ts - start_ts))
     timing_log "${label} elapsed=${elapsed}s"
+}
+
+timed_postgres_capture_cmd() {
+    local label="$1"
+    local cmd="$2"
+    local start_ts end_ts elapsed rc
+    rc=0
+    start_ts=$(date +%s)
+    ha_log_info "command_capture_start label=${label} cmd=${cmd}"
+    ha_log_capture_allow_fail "INFO" "${label}" "su - postgres -c \"${cmd}\"" || rc=$?
+    end_ts=$(date +%s)
+    elapsed=$((end_ts - start_ts))
+    if [ ${rc} -eq 0 ]; then
+        timing_log "${label} elapsed=${elapsed}s exit_code=${rc}"
+    else
+        timing_log "${label}_failed elapsed=${elapsed}s exit_code=${rc}"
+    fi
+    return ${rc}
 }
 
 apply_runtime_postgres_config() {
@@ -79,7 +98,9 @@ log_local_standby_snapshot() {
 }
 
 ha_log_section "开始 Standby 节点初始化"
+ha_log_event "standby_setup_start node=${NODE_NAME:-unknown} node_ip=${NODE_IP:-unknown} primary_candidate=${PARTNER_IP} pgdata=${PGDATA}"
 timing_log "script_start role=standby pgdata=${PGDATA} partner=${PARTNER_IP}"
+ha_log_ha_snapshot "standby_setup_start"
 
 partner_is_primary() {
     PGPASSWORD="${REPMGR_PASSWORD:-repmgr123}" psql \
@@ -187,6 +208,105 @@ stop_local_postgres_if_running() {
     fi
 }
 
+record_clone_failure_marker() {
+    local reason="$1"
+    local exit_code="$2"
+    local clone_dir="$3"
+
+    mkdir -p "${PGDATA}"
+    {
+        printf 'failed_at=%s\n' "$(date '+%F %T %z')"
+        printf 'node=%s\n' "${NODE_NAME:-unknown}"
+        printf 'source_primary=%s\n' "${PARTNER_IP}"
+        printf 'reason=%s\n' "${reason}"
+        printf 'exit_code=%s\n' "${exit_code}"
+        printf 'clone_dir=%s\n' "${clone_dir}"
+        printf 'run_id=%s\n' "${RUN_ID}"
+    } > "${CLONE_FAILURE_MARKER}"
+    chown postgres:postgres "${CLONE_FAILURE_MARKER}" 2>/dev/null || true
+}
+
+clear_clone_failure_marker() {
+    local reason="${1:-recovered}"
+
+    if [ -f "${CLONE_FAILURE_MARKER}" ]; then
+        rm -f "${CLONE_FAILURE_MARKER}"
+        ha_log_event "standby_clone_failure_cleared node=${NODE_NAME:-unknown} reason=${reason}"
+    fi
+}
+
+cleanup_stale_clone_workdirs() {
+    find "${PGDATA}" -mindepth 1 -maxdepth 1 -type d -name '.pg-ha-clone-*' \
+        -exec rm -rf {} + 2>/dev/null || true
+}
+
+prepare_clone_workdir() {
+    local clone_dir="$1"
+
+    mkdir -p "${PGDATA}"
+    chmod 700 "${PGDATA}"
+    chown postgres:postgres "${PGDATA}"
+
+    cleanup_stale_clone_workdirs
+    mkdir -p "${clone_dir}"
+    chmod 700 "${clone_dir}"
+    chown postgres:postgres "${clone_dir}"
+    ha_log_event "standby_clone_workspace_ready node=${NODE_NAME:-unknown} clone_dir=${clone_dir} old_pgdata_preserved=yes"
+}
+
+prepare_clone_repmgr_config() {
+    local clone_dir="$1"
+    local clone_conf="$2"
+
+    cp /etc/repmgr.conf "${clone_conf}"
+    sed -i "s|^data_directory=.*|data_directory='${clone_dir}'|" "${clone_conf}"
+    chmod 600 "${clone_conf}"
+    chown postgres:postgres "${clone_conf}"
+    ha_log_info "standby_clone_repmgr_config_ready clone_conf=${clone_conf} clone_dir=${clone_dir}"
+}
+
+activate_cloned_pgdata() {
+    local clone_dir="$1"
+    local backup_dir="$2"
+    local clone_base backup_base active_count backup_size_human
+
+    clone_base=$(basename "${clone_dir}")
+    backup_base=$(basename "${backup_dir}")
+
+    active_count=$(find "${PGDATA}" -mindepth 1 -maxdepth 1 \
+        ! -name "${clone_base}" \
+        ! -name '.pg-ha-retained-before-clone-*' \
+        -print 2>/dev/null | wc -l | tr -d '[:space:]')
+
+    ha_log_event "standby_clone_activate_start node=${NODE_NAME:-unknown} clone_dir=${clone_dir} active_items=${active_count:-0}"
+
+    if [ "${active_count:-0}" -gt 0 ]; then
+        mkdir -p "${backup_dir}"
+        chmod 700 "${backup_dir}"
+        chown postgres:postgres "${backup_dir}"
+
+        while IFS= read -r path; do
+            mv "${path}" "${backup_dir}/"
+        done < <(find "${PGDATA}" -mindepth 1 -maxdepth 1 \
+            ! -name "${clone_base}" \
+            ! -name "${backup_base}" \
+            ! -name '.pg-ha-retained-before-clone-*' \
+            -print)
+
+        backup_size_human=$(du -sh "${backup_dir}" 2>/dev/null | awk '{print $1}' || echo unknown)
+        ha_log_event "standby_clone_old_pgdata_retained node=${NODE_NAME:-unknown} retained_dir=${backup_dir} size_human=${backup_size_human:-unknown}"
+    fi
+
+    while IFS= read -r path; do
+        mv "${path}" "${PGDATA}/"
+    done < <(find "${clone_dir}" -mindepth 1 -maxdepth 1 -print)
+    rmdir "${clone_dir}" 2>/dev/null || true
+
+    chown -R postgres:postgres "${PGDATA}"
+    chmod 700 "${PGDATA}"
+    ha_log_event "standby_clone_activated node=${NODE_NAME:-unknown} pgdata=${PGDATA} retained_old_data=$([ "${active_count:-0}" -gt 0 ] && printf '%s' "${backup_dir}" || printf 'none')"
+}
+
 ensure_clean_shutdown_for_rejoin() {
     local prep_start_ts state signal_file
     prep_start_ts=$(date +%s)
@@ -280,15 +400,25 @@ fi
 # ---------------------------------------------------------------------------
 ha_log_info "等待 Primary 节点就绪 partner=${PARTNER_IP}"
 WAIT_PRIMARY_START_TS=$(date +%s)
+CLONE_FAILURE_WAIT_LOGGED=false
 for i in $(seq 1 ${MAX_WAIT}); do
     if pg_isready -h ${PARTNER_IP} -p ${PGPORT:-5432} -U repmgr -q 2>/dev/null; then
         ha_log_info "Primary 节点已就绪 attempts=${i}"
         timing_log "wait_primary_ready attempts=${i} elapsed=$(( $(date +%s) - WAIT_PRIMARY_START_TS ))s"
+        ha_log_event "primary_reachable node=${NODE_NAME:-unknown} primary_ip=${PARTNER_IP} attempts=${i} elapsed=$(( $(date +%s) - WAIT_PRIMARY_START_TS ))s"
+        if [ -f "${CLONE_FAILURE_MARKER}" ]; then
+            ha_log_event "standby_clone_retry_primary_reachable node=${NODE_NAME:-unknown} primary_ip=${PARTNER_IP} marker=${CLONE_FAILURE_MARKER} message=主库已恢复可达，备库开始重新尝试全量克隆"
+        fi
+        ha_log_ha_snapshot "standby_wait_primary_ready"
         break
     fi
     if [ $i -eq ${MAX_WAIT} ]; then
         ha_log_error "等待 Primary 节点超时 max_wait=${MAX_WAIT}s"
         exit 1
+    fi
+    if [ -f "${CLONE_FAILURE_MARKER}" ] && [ "${CLONE_FAILURE_WAIT_LOGGED}" != "true" ]; then
+        ha_log_event "standby_clone_interrupted_waiting_primary node=${NODE_NAME:-unknown} primary_ip=${PARTNER_IP} marker=${CLONE_FAILURE_MARKER} message=当前备库全量克隆发生意外，正在等待主库启动"
+        CLONE_FAILURE_WAIT_LOGGED=true
     fi
     ha_log_info "等待 Primary 进度 attempt=${i}/${MAX_WAIT}"
     sleep 1
@@ -303,6 +433,7 @@ sleep 3
 # 如果数据目录已存在且有效，检查是否需要重新克隆
 if [ -s "${PGDATA}/PG_VERSION" ]; then
     ha_log_info "数据目录已存在，检查复制状态"
+    ha_log_ha_snapshot "standby_existing_data_detected"
     if [ "${LOCAL_DATA_ROLE_HINT}" = "primary" ]; then
         ha_log_warn "数据目录按旧主节点处理，尝试按 repmgr 标准方式执行 pg_rewind + node rejoin"
         REJOIN_REASON="old-primary-rejoin"
@@ -310,21 +441,26 @@ if [ -s "${PGDATA}/PG_VERSION" ]; then
         if ensure_clean_shutdown_for_rejoin; then
             REJOIN_DRY_RUN_OK=true
             REJOIN_DRY_RUN_START_TS=$(date +%s)
-            if su - postgres -c "repmgr node rejoin -f /etc/repmgr.conf \
+            ha_log_event "old_primary_rejoin_dry_run_start node=${NODE_NAME:-unknown} target_primary=${PARTNER_IP}"
+            if timed_postgres_capture_cmd "node_rejoin_dry_run" "repmgr node rejoin -f /etc/repmgr.conf \
                 -d 'host=${PARTNER_IP} port=${PGPORT:-5432} user=repmgr dbname=repmgr connect_timeout=5' \
                 --force-rewind --config-files=postgresql.conf,pg_hba.conf --verbose --dry-run"; then
                 timing_log "node_rejoin_dry_run elapsed=$(( $(date +%s) - REJOIN_DRY_RUN_START_TS ))s"
+                ha_log_event "old_primary_rejoin_dry_run_success node=${NODE_NAME:-unknown} elapsed=$(( $(date +%s) - REJOIN_DRY_RUN_START_TS ))s"
             else
                 REJOIN_DRY_RUN_OK=false
                 timing_log "node_rejoin_dry_run_failed elapsed=$(( $(date +%s) - REJOIN_DRY_RUN_START_TS ))s"
                 ha_log_warn "repmgr node rejoin --dry-run 失败，直接降级为全量克隆"
+                ha_log_event "old_primary_rejoin_fallback node=${NODE_NAME:-unknown} reason=dry_run_failed elapsed=$(( $(date +%s) - REJOIN_DRY_RUN_START_TS ))s"
                 print_rejoin_diagnostics
                 stop_local_postgres_if_running
             fi
 
             if [ "${REJOIN_DRY_RUN_OK}" = "true" ] && [ "${goto_register}" != "true" ]; then
                 REJOIN_START_TS=$(date +%s)
-                if su - postgres -c "repmgr node rejoin -f /etc/repmgr.conf \
+                ha_log_event "old_primary_rejoin_start node=${NODE_NAME:-unknown} target_primary=${PARTNER_IP}"
+                ha_log_ha_snapshot "standby_before_node_rejoin"
+                if timed_postgres_capture_cmd "node_rejoin" "repmgr node rejoin -f /etc/repmgr.conf \
                     -d 'host=${PARTNER_IP} port=${PGPORT:-5432} user=repmgr dbname=repmgr connect_timeout=5' \
                     --force-rewind --config-files=postgresql.conf,pg_hba.conf --verbose --no-wait"; then
                     timing_log "node_rejoin_command_return elapsed=$(( $(date +%s) - REJOIN_START_TS ))s"
@@ -332,12 +468,14 @@ if [ -s "${PGDATA}/PG_VERSION" ]; then
                     if wait_for_rejoin_streaming "${REJOIN_VERIFY_TIMEOUT}"; then
                         ha_log_info "pg_rewind 增量同步成功，跳过全量克隆"
                         timing_log "node_rejoin_success elapsed=$(( $(date +%s) - REJOIN_START_TS ))s verify_timeout=${REJOIN_VERIFY_TIMEOUT}s"
+                        ha_log_event "old_primary_rejoin_success node=${NODE_NAME:-unknown} target_primary=${PARTNER_IP} elapsed=$(( $(date +%s) - REJOIN_START_TS ))s wal_receiver=streaming"
                         cp /etc/pg-ha/conf/postgresql.conf ${PGDATA}/postgresql.conf
                         cp /etc/pg-ha/conf/pg_hba.conf ${PGDATA}/pg_hba.conf
                         apply_runtime_postgres_config "${PGDATA}/postgresql.conf"
                         chown postgres:postgres ${PGDATA}/postgresql.conf ${PGDATA}/pg_hba.conf
                         su - postgres -c "pg_ctl -D ${PGDATA} reload" 2>/dev/null || true
                         log_local_standby_snapshot "node_rejoin_postcheck"
+                        ha_log_ha_snapshot "standby_after_node_rejoin_success"
                         goto_register=true
                     else
                         REJOIN_VERIFY_RC=$?
@@ -350,8 +488,10 @@ if [ -s "${PGDATA}/PG_VERSION" ]; then
                         else
                             if [ "${REJOIN_VERIFY_RC}" = "2" ]; then
                                 ha_log_warn "检测到 timeline/WAL 致命错误，快速降级为全量克隆"
+                                ha_log_event "old_primary_rejoin_fallback node=${NODE_NAME:-unknown} reason=timeline_or_wal_error elapsed=$(( $(date +%s) - REJOIN_START_TS ))s"
                             else
                                 ha_log_warn "node rejoin 校验失败，降级为全量克隆"
+                                ha_log_event "old_primary_rejoin_fallback node=${NODE_NAME:-unknown} reason=verify_failed elapsed=$(( $(date +%s) - REJOIN_START_TS ))s"
                             fi
                             stop_local_postgres_if_running
                         fi
@@ -366,12 +506,14 @@ if [ -s "${PGDATA}/PG_VERSION" ]; then
                         goto_register=true
                     else
                         ha_log_warn "pg_rewind 失败，降级为全量克隆"
+                        ha_log_event "old_primary_rejoin_fallback node=${NODE_NAME:-unknown} reason=rejoin_failed elapsed=$(( $(date +%s) - REJOIN_START_TS ))s"
                         stop_local_postgres_if_running
                     fi
                 fi
             fi
         else
             ha_log_warn "旧主回归前的一致性准备失败，降级为全量克隆"
+            ha_log_event "old_primary_rejoin_fallback node=${NODE_NAME:-unknown} reason=prepare_failed"
             stop_local_postgres_if_running
         fi
     else
@@ -415,21 +557,43 @@ fi
 if [ "${goto_register}" != "true" ]; then
     ha_log_info "从 Primary 克隆数据 partner=${PARTNER_IP}"
     CLONE_START_TS=$(date +%s)
+    CLONE_WORK_DIR="${PGDATA}/.pg-ha-clone-${RUN_ID}"
+    CLONE_RETAINED_BASE="${HA_RETAINED_PGDATA_DIR:-/var/lib/postgresql/pg-ha-retained-before-clone}/${NODE_NAME:-unknown}"
+    CLONE_RETAINED_DIR="${CLONE_RETAINED_BASE}/.pg-ha-retained-before-clone-${RUN_ID}"
+    CLONE_REPMGR_CONF="/tmp/repmgr-clone-${RUN_ID}.conf"
+    ha_log_event "standby_clone_start node=${NODE_NAME:-unknown} source_primary=${PARTNER_IP} target_pgdata=${PGDATA} mode=safe_two_phase"
+    ha_log_ha_snapshot "standby_before_clone"
 
-    # 清空数据目录（repmgr standby clone 需要空目录或使用 --force）
-    if [ -d "${PGDATA}" ]; then
-        rm -rf ${PGDATA}/*
+    mkdir -p "${CLONE_RETAINED_BASE}"
+    chown postgres:postgres "${CLONE_RETAINED_BASE}" 2>/dev/null || true
+    prepare_clone_workdir "${CLONE_WORK_DIR}"
+    prepare_clone_repmgr_config "${CLONE_WORK_DIR}" "${CLONE_REPMGR_CONF}"
+
+    if timed_postgres_capture_cmd "standby_clone" "repmgr -h ${PARTNER_IP} -U repmgr -d repmgr -f '${CLONE_REPMGR_CONF}' standby clone --force --fast-checkpoint"; then
+        :
+    else
+        CLONE_RC=$?
+        record_clone_failure_marker "standby_clone_failed" "${CLONE_RC}" "${CLONE_WORK_DIR}"
+        ha_log_event "standby_clone_failed node=${NODE_NAME:-unknown} source_primary=${PARTNER_IP} elapsed=$(( $(date +%s) - CLONE_START_TS ))s exit_code=${CLONE_RC} old_pgdata_preserved=yes clone_dir=${CLONE_WORK_DIR}"
+        ha_log_event "standby_clone_interrupted_waiting_primary node=${NODE_NAME:-unknown} primary_ip=${PARTNER_IP} marker=${CLONE_FAILURE_MARKER} message=当前备库全量克隆发生意外，正在等待主库启动"
+        rm -f "${CLONE_REPMGR_CONF}" 2>/dev/null || true
+        exit ${CLONE_RC}
     fi
-
-    timed_postgres_cmd "standby_clone" "repmgr -h ${PARTNER_IP} -U repmgr -d repmgr -f /etc/repmgr.conf standby clone --force --fast-checkpoint"
+    rm -f "${CLONE_REPMGR_CONF}" 2>/dev/null || true
     ha_log_info "数据克隆完成"
     timing_log "standby_clone_total elapsed=$(( $(date +%s) - CLONE_START_TS ))s"
+    CLONE_SIZE_BYTES=$(du -sb "${CLONE_WORK_DIR}" 2>/dev/null | awk '{print $1}' || echo unknown)
+    CLONE_SIZE_HUMAN=$(du -sh "${CLONE_WORK_DIR}" 2>/dev/null | awk '{print $1}' || echo unknown)
+    ha_log_event "standby_clone_done node=${NODE_NAME:-unknown} source_primary=${PARTNER_IP} elapsed=$(( $(date +%s) - CLONE_START_TS ))s size_bytes=${CLONE_SIZE_BYTES:-unknown} size_human=${CLONE_SIZE_HUMAN:-unknown} old_pgdata_preserved=yes"
+    ha_log_ha_snapshot "standby_after_clone"
 
-    # 应用自定义配置（克隆后覆盖，确保一致性）
-    cp /etc/pg-ha/conf/postgresql.conf ${PGDATA}/postgresql.conf
-    cp /etc/pg-ha/conf/pg_hba.conf ${PGDATA}/pg_hba.conf
-    apply_runtime_postgres_config "${PGDATA}/postgresql.conf"
-    chown postgres:postgres ${PGDATA}/postgresql.conf ${PGDATA}/pg_hba.conf
+    # 应用自定义配置（先写入新 clone，再激活到正式 PGDATA）
+    cp /etc/pg-ha/conf/postgresql.conf ${CLONE_WORK_DIR}/postgresql.conf
+    cp /etc/pg-ha/conf/pg_hba.conf ${CLONE_WORK_DIR}/pg_hba.conf
+    apply_runtime_postgres_config "${CLONE_WORK_DIR}/postgresql.conf"
+    chown postgres:postgres ${CLONE_WORK_DIR}/postgresql.conf ${CLONE_WORK_DIR}/pg_hba.conf
+
+    activate_cloned_pgdata "${CLONE_WORK_DIR}" "${CLONE_RETAINED_DIR}"
 
     # ---------------------------------------------------------------------------
     # 步骤 3：启动 Standby PostgreSQL
@@ -444,7 +608,9 @@ if [ "${goto_register}" != "true" ]; then
         if su - postgres -c "pg_isready -q"; then
             ha_log_info "PostgreSQL 已就绪 attempts=${i}"
             timing_log "standby_pg_ready attempts=${i} elapsed=$(( $(date +%s) - READY_WAIT_START_TS ))s"
+            ha_log_event "postgres_ready node=${NODE_NAME:-unknown} role=standby attempts=${i} elapsed=$(( $(date +%s) - READY_WAIT_START_TS ))s"
             log_local_standby_snapshot "standby_pg_ready"
+            ha_log_ha_snapshot "standby_pg_ready"
             break
         fi
         if [ $i -eq 30 ]; then
@@ -459,8 +625,39 @@ fi
 # 步骤 4：注册 Standby 节点到 repmgr
 # ---------------------------------------------------------------------------
 ha_log_info "注册 Standby 节点"
-timed_postgres_cmd "standby_register" "repmgr -f /etc/repmgr.conf standby register --force"
+ha_log_ha_snapshot "standby_before_register"
+timed_postgres_cmd "standby_register" "repmgr -f /etc/repmgr.conf standby register --force --wait-sync=30"
 ha_log_info "Standby 节点注册完成"
+ha_log_event "repmgr_standby_registered node=${NODE_NAME:-unknown} node_id=${NODE_ID:-unknown} upstream=${PARTNER_IP}"
+
+REGISTER_SYNC_START_TS=$(date +%s)
+EXPECTED_UPSTREAM_NODE_ID=""
+if [ "${NODE_ID:-}" = "1" ]; then
+    EXPECTED_UPSTREAM_NODE_ID="2"
+elif [ "${NODE_ID:-}" = "2" ]; then
+    EXPECTED_UPSTREAM_NODE_ID="1"
+fi
+for i in $(seq 1 30); do
+    LOCAL_REPMGR_RECORD=$(su - postgres -c "psql -p ${PGPORT} -d repmgr -tAc \"SELECT concat(type, '|', COALESCE(upstream_node_id::text, ''), '|', active::text) FROM repmgr.nodes WHERE node_id = ${NODE_ID}\"" 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -n "${EXPECTED_UPSTREAM_NODE_ID}" ] && [ "${LOCAL_REPMGR_RECORD}" = "standby|${EXPECTED_UPSTREAM_NODE_ID}|true" ]; then
+        ha_log_info "standby_register_local_sync_ready record=${LOCAL_REPMGR_RECORD} attempts=${i}"
+        timing_log "standby_register_local_sync elapsed=$(( $(date +%s) - REGISTER_SYNC_START_TS ))s attempts=${i}"
+        break
+    fi
+    if [ -z "${EXPECTED_UPSTREAM_NODE_ID}" ] && echo "${LOCAL_REPMGR_RECORD}" | grep -q '^standby|'; then
+        ha_log_info "standby_register_local_sync_ready record=${LOCAL_REPMGR_RECORD} attempts=${i}"
+        timing_log "standby_register_local_sync elapsed=$(( $(date +%s) - REGISTER_SYNC_START_TS ))s attempts=${i}"
+        break
+    fi
+    if [ "${i}" -eq 30 ]; then
+        ha_log_warn "standby_register_local_sync_timeout last_record=${LOCAL_REPMGR_RECORD:-none} elapsed=$(( $(date +%s) - REGISTER_SYNC_START_TS ))s"
+        timing_log "standby_register_local_sync_timeout elapsed=$(( $(date +%s) - REGISTER_SYNC_START_TS ))s last_record=${LOCAL_REPMGR_RECORD:-none}"
+        break
+    fi
+    sleep 1
+done
+
+ha_log_ha_snapshot "standby_after_register"
 
 # 查看集群状态
 ha_log_capture_allow_fail "INFO" "standby_cluster_show" "su - postgres -c \"repmgr -f /etc/repmgr.conf cluster show\"" || true
@@ -486,21 +683,25 @@ if [ "${START_REPMGRD}" = "true" ]; then
     ha_log_info "启动 repmgrd 守护进程"
     timed_postgres_cmd "standby_repmgrd_start" "repmgrd -f /etc/repmgr.conf --pid-file=/tmp/repmgrd.pid --daemonize"
     ha_log_info "repmgrd 已启动"
+    ha_log_event "repmgrd_started node=${NODE_NAME:-unknown} role=standby"
 else
     ha_log_info "跳过 repmgrd 启动，复用现有进程"
 fi
 /usr/local/bin/wal-receiver-control.sh restart || true
 ha_log_info "standby_wal_receiver_started"
-ha_log_capture_allow_fail "INFO" "standby_runtime_snapshot" "su - postgres -c \"psql -x -c \\\"SELECT pg_is_in_recovery() AS in_recovery\\\" -c \\\"SELECT status, sender_host, sender_port FROM pg_stat_wal_receiver\\\"\"" || true
+ha_log_ha_snapshot "standby_after_wal_receiver"
+ha_log_capture_allow_fail "INFO" "standby_runtime_snapshot" "su - postgres -c \"psql -x -c \\\"SELECT pg_is_in_recovery() AS in_recovery\\\" -c \\\"SELECT status, sender_host, sender_port, latest_end_lsn, latest_end_time FROM pg_stat_wal_receiver\\\"\"" || true
 
 if [ -n "${REJOIN_REASON}" ]; then
     /usr/local/bin/wecom-notify.sh \
         "node_rejoin" \
         "1" \
         "$(date '+%F %T %z')" \
-        "node \"${NODE_NAME:-unknown}\" 已重新加入集群并以 Standby 跟随 \"${PARTNER_IP}\"" \
-        >> /var/log/repmgr/wecom-notify.log 2>&1 || true
+        "node \"${NODE_NAME:-unknown}\" 已重新加入集群并以 Standby 跟随 \"${PARTNER_IP}\"" || true
 fi
 
 ha_log_section "Standby 节点初始化完成"
+ha_log_event "standby_available node=${NODE_NAME:-unknown} upstream=${PARTNER_IP} total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s"
 timing_log "script_complete role=standby total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s rejoin_reason=${REJOIN_REASON:-none}"
+clear_clone_failure_marker "standby_available"
+ha_log_ha_snapshot "standby_setup_complete"

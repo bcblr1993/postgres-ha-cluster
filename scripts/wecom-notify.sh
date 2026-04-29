@@ -17,6 +17,7 @@ if [ -f "${RUNTIME_ENV_FILE}" ]; then
     # shellcheck disable=SC1090
     . "${RUNTIME_ENV_FILE}"
 fi
+export TZ=${TZ:-Asia/Shanghai}
 
 EVENT_TYPE=${1:-unknown}
 SUCCESS=${2:-0}
@@ -304,8 +305,10 @@ fi
 
 if printf '%s' "${HTTP_RESPONSE}" | grep -q '"errcode"[[:space:]]*:[[:space:]]*0'; then
     ha_log_info "notify_send_success event=${EVENT_TYPE}"
+    ha_log_event "wecom_notify_success event=${EVENT_TYPE} node=${NODE_NAME} role=${PG_ROLE} primary=${PRIMARY_NAME} vip_present=${VIP_PRESENT} service_status=${SERVICE_STATUS}"
 else
     ha_log_warn "notify_send_unexpected_response event=${EVENT_TYPE} response=${HTTP_RESPONSE}"
+    ha_log_event "wecom_notify_unexpected_response event=${EVENT_TYPE} node=${NODE_NAME} response=${HTTP_RESPONSE}"
 fi
 
 exit 0

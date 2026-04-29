@@ -85,7 +85,9 @@ check_partner_primary_with_timing() {
 }
 
 ha_log_section "开始 Primary 节点初始化"
+ha_log_event "primary_setup_start node=${NODE_NAME:-unknown} node_ip=${NODE_IP:-unknown} partner_ip=${PARTNER_IP} pgdata=${PGDATA}"
 timing_log "script_start role=primary pgdata=${PGDATA} partner=${PARTNER_IP}"
+ha_log_ha_snapshot "primary_setup_start"
 
 partner_is_primary() {
     PGPASSWORD="${REPMGR_PASSWORD}" psql \
@@ -165,6 +167,7 @@ for i in $(seq 1 30); do
     if su - postgres -c "pg_isready -q"; then
         ha_log_info "PostgreSQL 已就绪 attempts=${i}"
         timing_log "primary_pg_ready attempts=${i} elapsed=$(( $(date +%s) - READY_WAIT_START_TS ))s"
+        ha_log_event "postgres_ready node=${NODE_NAME:-unknown} role=primary attempts=${i} elapsed=$(( $(date +%s) - READY_WAIT_START_TS ))s"
         break
     fi
     if [ $i -eq 30 ]; then
@@ -205,8 +208,11 @@ timing_log "primary_db_setup elapsed=$(( $(date +%s) - DB_SETUP_START_TS ))s"
 # 步骤 4：注册 Primary 节点到 repmgr（幂等操作）
 # ---------------------------------------------------------------------------
 ha_log_info "注册 Primary 节点"
+ha_log_ha_snapshot "primary_before_register"
 timed_postgres_cmd "primary_register" "repmgr -f /etc/repmgr.conf primary register --force"
 ha_log_info "Primary 节点注册完成"
+ha_log_event "repmgr_primary_registered node=${NODE_NAME:-unknown} node_id=${NODE_ID:-unknown}"
+ha_log_ha_snapshot "primary_after_register"
 
 # 查看集群状态
 ha_log_capture_allow_fail "INFO" "primary_cluster_show" "su - postgres -c \"repmgr -f /etc/repmgr.conf cluster show\"" || true
@@ -231,10 +237,14 @@ if [ "${START_REPMGRD}" = "true" ]; then
     ha_log_info "启动 repmgrd 守护进程"
     timed_postgres_cmd "primary_repmgrd_start" "repmgrd -f /etc/repmgr.conf --pid-file=/tmp/repmgrd.pid --daemonize"
     ha_log_info "repmgrd 已启动"
+    ha_log_event "repmgrd_started node=${NODE_NAME:-unknown} role=primary"
 else
     ha_log_info "跳过 repmgrd 启动，复用现有进程"
 fi
-ha_log_capture_allow_fail "INFO" "primary_runtime_snapshot" "su - postgres -c \"psql -x -c \\\"SELECT pg_is_in_recovery() AS in_recovery, pg_current_wal_lsn() AS current_wal_lsn\\\"\"" || true
+ha_log_ha_snapshot "primary_after_repmgrd"
+ha_log_capture_allow_fail "INFO" "primary_runtime_snapshot" "su - postgres -c \"psql -x -c \\\"SELECT pg_is_in_recovery() AS in_recovery, pg_current_wal_lsn() AS current_wal_lsn\\\" -c \\\"SELECT application_name, client_addr, state, sync_state, sent_lsn, write_lsn, flush_lsn, replay_lsn FROM pg_stat_replication ORDER BY application_name\\\"\"" || true
 
 ha_log_section "Primary 节点初始化完成"
+ha_log_event "primary_available node=${NODE_NAME:-unknown} total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s"
 timing_log "script_complete role=primary total_elapsed=$(( $(date +%s) - SCRIPT_START_TS ))s"
+ha_log_ha_snapshot "primary_setup_complete"

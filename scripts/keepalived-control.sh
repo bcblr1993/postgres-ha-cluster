@@ -38,18 +38,36 @@ start_keepalived() {
         return 0
     fi
 
-    ha_log_info "keepalived_start command=/usr/sbin/keepalived"
-    run_as_root /usr/sbin/keepalived --no-syslog --log-console --log-detail --pid="${PID_FILE}" >"${LOG_FILE}" 2>&1 &
-    sleep 1
+    for START_ATTEMPT in 1 2 3; do
+        if [ -f "${PID_FILE}" ]; then
+            STALE_PID=$(cat "${PID_FILE}" 2>/dev/null || true)
+            ha_log_warn "keepalived_stale_pid_file_removed pid_file=${PID_FILE} stale_pid=${STALE_PID:-unknown} attempt=${START_ATTEMPT}"
+            run_as_root rm -f "${PID_FILE}" 2>/dev/null || rm -f "${PID_FILE}" || true
+        fi
 
-    if ! pgrep -x keepalived >/dev/null 2>&1; then
-        ha_log_error "keepalived_start_failed pid_file=${PID_FILE} log_file=${LOG_FILE}"
-        ha_log_tail_file "ERROR" "keepalived_start_failed_tail" "${LOG_FILE}" 80 || true
-        exit 1
-    fi
-    ha_log_info "keepalived_started pid=$(cat "${PID_FILE}" 2>/dev/null || echo unknown)"
-    log_vip_snapshot || true
-    ha_log_tail_file "INFO" "keepalived_start_tail" "${LOG_FILE}" 20 || true
+        : > "${LOG_FILE}" 2>/dev/null || true
+        ha_log_info "keepalived_start command=/usr/sbin/keepalived attempt=${START_ATTEMPT}"
+        run_as_root /usr/sbin/keepalived --no-syslog --log-console --log-detail --pid="${PID_FILE}" >"${LOG_FILE}" 2>&1 &
+        sleep 1
+
+        if pgrep -x keepalived >/dev/null 2>&1; then
+            ha_log_info "keepalived_started pid=$(cat "${PID_FILE}" 2>/dev/null || echo unknown) attempt=${START_ATTEMPT}"
+            ha_log_event "keepalived_started node=${NODE_NAME:-unknown} pid=$(cat "${PID_FILE}" 2>/dev/null || echo unknown) attempt=${START_ATTEMPT}"
+            log_vip_snapshot || true
+            ha_log_tail_file "INFO" "keepalived_start_tail" "${LOG_FILE}" 20 || true
+            return 0
+        fi
+
+        ha_log_warn "keepalived_start_attempt_failed attempt=${START_ATTEMPT} pid_file=${PID_FILE} log_file=${LOG_FILE}"
+        ha_log_tail_file "WARN" "keepalived_start_attempt_failed_tail" "${LOG_FILE}" 80 || true
+        run_as_root /usr/bin/killall keepalived 2>/dev/null || true
+        run_as_root rm -f "${PID_FILE}" 2>/dev/null || rm -f "${PID_FILE}" || true
+        sleep 1
+    done
+
+    ha_log_error "keepalived_start_failed attempts=3 pid_file=${PID_FILE} log_file=${LOG_FILE}"
+    ha_log_tail_file "ERROR" "keepalived_start_failed_tail" "${LOG_FILE}" 80 || true
+    return 1
 }
 
 stop_keepalived() {

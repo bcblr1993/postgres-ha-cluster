@@ -38,7 +38,11 @@ record_failure_count() {
     printf '%s' "${count}" > "${COUNT_FILE}"
 
     if [ ${count} -eq 1 ] || [ $((count % 30)) -eq 0 ]; then
-        ha_log_warn "health_check_failure reason=${reason} consecutive=${count}"
+        if [ "${reason}" = "node_not_primary" ]; then
+            ha_log_info "health_check_non_primary reason=${reason} consecutive=${count}"
+        else
+            ha_log_warn "health_check_failure reason=${reason} consecutive=${count}"
+        fi
     fi
 }
 
