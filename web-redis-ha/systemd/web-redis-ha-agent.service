@@ -1,0 +1,17 @@
+[Unit]
+Description=Web/Redis single-active HA agent
+Documentation=file:/etc/web-redis-ha/web-redis-ha.env
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/web-redis-ha/web-redis-ha.env
+ExecStart=/usr/local/bin/web-redis-ha.sh agent
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
