@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900" role="img" aria-labelledby="title desc">
+  <title id="title">PostgreSQL 双机热备漫画流程图</title>
+  <desc id="desc">用四格漫画解释 PostgreSQL HA 正常运行、主库故障、VIP 切换和旧主恢复全量 clone 的实现机制。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f8f4e8; }
+      .panel { fill: #fffaf0; stroke: #1f2933; stroke-width: 5; rx: 28; }
+      .title { font: 700 34px "PingFang SC", "Microsoft YaHei", Arial, sans-serif; fill: #102a43; }
+      .label { font: 700 24px "PingFang SC", "Microsoft YaHei", Arial, sans-serif; fill: #102a43; }
+      .small { font: 500 18px "PingFang SC", "Microsoft YaHei", Arial, sans-serif; fill: #243b53; }
+      .tiny { font: 500 15px "PingFang SC", "Microsoft YaHei", Arial, sans-serif; fill: #334e68; }
+      .bubble { fill: #ffffff; stroke: #1f2933; stroke-width: 3; }
+      .vip { fill: #ffd166; stroke: #1f2933; stroke-width: 4; }
+      .primary { fill: #35b779; stroke: #1f2933; stroke-width: 4; }
+      .standby { fill: #73c2fb; stroke: #1f2933; stroke-width: 4; }
+      .down { fill: #f87171; stroke: #1f2933; stroke-width: 4; }
+      .disk { fill: #e9d8fd; stroke: #1f2933; stroke-width: 4; }
+      .arrow { stroke: #1f2933; stroke-width: 5; fill: none; stroke-linecap: round; stroke-linejoin: round; marker-end: url(#arrowHead); }
+      .dash { stroke-dasharray: 12 10; }
+      .zap { fill: #ffd166; stroke: #1f2933; stroke-width: 4; }
+      .note { fill: #e0f2fe; stroke: #1f2933; stroke-width: 3; }
+    </style>
+    <marker id="arrowHead" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto">
+      <path d="M1,1 L11,6 L1,11 Z" fill="#1f2933"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1400" height="900"/>
+  <text class="title" x="700" y="58" text-anchor="middle">PostgreSQL 双机热备：从正常运行到故障恢复</text>
+  <text class="small" x="700" y="90" text-anchor="middle">repmgr 负责角色切换，Keepalived 负责 VIP 漂移，clone/rejoin 负责旧主回归</text>
+
+  <rect class="panel" x="45" y="125" width="625" height="330" rx="28"/>
+  <rect class="panel" x="730" y="125" width="625" height="330" rx="28"/>
+  <rect class="panel" x="45" y="510" width="625" height="330" rx="28"/>
+  <rect class="panel" x="730" y="510" width="625" height="330" rx="28"/>
+
+  <!-- Panel 1 -->
+  <text class="label" x="80" y="172">1. 正常运行</text>
+  <rect class="bubble" x="82" y="205" width="130" height="70" rx="20"/>
+  <text class="small" x="147" y="234" text-anchor="middle">业务应用</text>
+  <text class="tiny" x="147" y="258" text-anchor="middle">只连 VIP</text>
+
+  <rect class="vip" x="282" y="205" width="150" height="70" rx="22"/>
+  <text class="small" x="357" y="234" text-anchor="middle">VIP</text>
+  <text class="tiny" x="357" y="258" text-anchor="middle">统一入口</text>
+
+  <rect class="primary" x="500" y="190" width="120" height="95" rx="18"/>
+  <text class="small" x="560" y="225" text-anchor="middle">Node A</text>
+  <text class="tiny" x="560" y="252" text-anchor="middle">Primary</text>
+
+  <rect class="standby" x="500" y="325" width="120" height="82" rx="18"/>
+  <text class="small" x="560" y="356" text-anchor="middle">Node B</text>
+  <text class="tiny" x="560" y="381" text-anchor="middle">Standby</text>
+
+  <path class="arrow" d="M213 240 C238 240 250 240 282 240"/>
+  <path class="arrow" d="M432 240 C458 240 470 238 500 238"/>
+  <path class="arrow dash" d="M560 286 C560 305 560 310 560 325"/>
+  <text class="tiny" x="392" y="335" text-anchor="middle">流复制追赶 WAL</text>
+
+  <!-- Panel 2 -->
+  <text class="label" x="765" y="172">2. 主库故障</text>
+  <polygon class="zap" points="840,210 880,210 862,255 895,255 830,335 850,275 818,275"/>
+  <rect class="down" x="775" y="305" width="135" height="78" rx="18"/>
+  <text class="small" x="842" y="337" text-anchor="middle">Node A</text>
+  <text class="tiny" x="842" y="362" text-anchor="middle">断电/停止</text>
+
+  <rect class="standby" x="1115" y="205" width="140" height="92" rx="18"/>
+  <text class="small" x="1185" y="238" text-anchor="middle">Node B</text>
+  <text class="tiny" x="1185" y="264" text-anchor="middle">准备升主</text>
+
+  <rect class="note" x="965" y="325" width="260" height="75" rx="18"/>
+  <text class="small" x="1095" y="355" text-anchor="middle">repmgr 检测失败</text>
+  <text class="tiny" x="1095" y="382" text-anchor="middle">promote 成功后才允许接管</text>
+
+  <path class="arrow" d="M912 345 C950 310 1015 280 1115 255"/>
+  <text class="tiny" x="1012" y="238" text-anchor="middle">不是 VIP 先漂</text>
+
+  <!-- Panel 3 -->
+  <text class="label" x="80" y="557">3. VIP 跟随新主</text>
+  <rect class="bubble" x="82" y="595" width="130" height="70" rx="20"/>
+  <text class="small" x="147" y="624" text-anchor="middle">业务应用</text>
+  <text class="tiny" x="147" y="648" text-anchor="middle">自动重连</text>
+
+  <rect class="vip" x="282" y="595" width="150" height="70" rx="22"/>
+  <text class="small" x="357" y="624" text-anchor="middle">VIP</text>
+  <text class="tiny" x="357" y="648" text-anchor="middle">漂到新主</text>
+
+  <rect class="primary" x="500" y="575" width="120" height="95" rx="18"/>
+  <text class="small" x="560" y="610" text-anchor="middle">Node B</text>
+  <text class="tiny" x="560" y="637" text-anchor="middle">Primary</text>
+
+  <rect class="note" x="310" y="718" width="285" height="74" rx="18"/>
+  <text class="small" x="452" y="748" text-anchor="middle">Keepalived MASTER</text>
+  <text class="tiny" x="452" y="775" text-anchor="middle">日志 + 企业微信通知可见</text>
+
+  <path class="arrow" d="M213 630 C238 630 250 630 282 630"/>
+  <path class="arrow" d="M432 630 C458 630 470 622 500 622"/>
+  <path class="arrow" d="M452 718 C470 700 500 682 536 666"/>
+
+  <!-- Panel 4 -->
+  <text class="label" x="765" y="557">4. 旧主恢复 / Clone 保护</text>
+  <rect class="down" x="780" y="595" width="115" height="80" rx="18"/>
+  <text class="small" x="838" y="626" text-anchor="middle">Node A</text>
+  <text class="tiny" x="838" y="652" text-anchor="middle">旧主回归</text>
+
+  <rect class="primary" x="1190" y="595" width="120" height="90" rx="18"/>
+  <text class="small" x="1250" y="628" text-anchor="middle">Node B</text>
+  <text class="tiny" x="1250" y="654" text-anchor="middle">Primary</text>
+
+  <rect class="disk" x="950" y="585" width="150" height="60" rx="18"/>
+  <text class="tiny" x="1025" y="622" text-anchor="middle">.pg-ha-clone-*</text>
+
+  <rect class="disk" x="950" y="675" width="150" height="60" rx="18"/>
+  <text class="tiny" x="1025" y="712" text-anchor="middle">current</text>
+
+  <rect class="disk" x="950" y="765" width="150" height="60" rx="18"/>
+  <text class="tiny" x="1025" y="802" text-anchor="middle">latest 旧数据</text>
+
+  <path class="arrow dash" d="M1190 640 C1160 640 1132 620 1100 615"/>
+  <path class="arrow" d="M895 635 C918 625 930 620 950 615"/>
+  <path class="arrow" d="M1025 645 C1025 660 1025 662 1025 675"/>
+  <path class="arrow" d="M1025 735 C1025 750 1025 752 1025 765"/>
+
+  <rect class="bubble" x="775" y="720" width="135" height="72" rx="20"/>
+  <text class="tiny" x="842" y="748" text-anchor="middle">失败不删 current</text>
+  <text class="tiny" x="842" y="772" text-anchor="middle">成功只留一份 latest</text>
+</svg>

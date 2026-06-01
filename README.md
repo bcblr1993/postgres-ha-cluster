@@ -12,6 +12,24 @@
 
 ---
 
+## 🖼️ 实现机制漫画图
+
+下面这张图用四格漫画方式说明当前双机热备的核心链路：正常运行、主库故障、VIP 跟随新主、旧主恢复 / 全量 clone 保护。
+
+![PostgreSQL 双机热备漫画流程图](docs/assets/postgres-ha-comic-flow.svg)
+
+---
+
+## ✅ 测试场景总览
+
+本项目已整理双机热备验收测试矩阵，覆盖主备启动、持续写入、正常停止、突然断电、双节点同时断电、旧主回归、全量 clone 失败保护、多次 clone 保留策略、VIP 顺序不变量、企业微信通知和日志可观测性。
+
+- 测试场景总览：[docs/ha-test-scenarios.md](docs/ha-test-scenarios.md)
+- 命令级完整用例：[docs/ha-failover-test-cases.md](docs/ha-failover-test-cases.md)
+- 已知风险说明：[docs/known-risks.md](docs/known-risks.md)
+
+---
+
 ## 🚀 极简部署指南
 
 ### 第一步：准备离线镜像与环境
