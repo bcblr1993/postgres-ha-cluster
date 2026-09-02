@@ -214,11 +214,24 @@ ORDER BY event_timestamp DESC LIMIT 20;\"" 2>/dev/null
                     fi
                     ;;
                 b)
+                    # 注意：不能用 pkill -f repmgrd —— 本条 docker exec 的 bash -c
+                    # 命令行自身就包含 "repmgrd" 字符串，pkill -f 会把执行中的 shell
+                    # 一并杀掉，导致后面的启动命令永远执行不到（重启失败的根因）。
+                    # 改用 PID 文件精确 kill（与 docker-entrypoint.sh 的停机逻辑一致），
+                    # 并清理残留 PID 文件，否则 repmgrd 会误判已运行而拒绝启动。
                     echo "正在重启 repmgrd..."
-                    docker exec "${CONTAINER}" bash -c \
-                        "pkill -f repmgrd 2>/dev/null; sleep 2; su - postgres -c 'repmgrd -f /etc/repmgr.conf --pid-file=/tmp/repmgrd.pid --daemonize'"
+                    docker exec "${CONTAINER}" bash -c '
+                        PID_FILE=/tmp/repmgrd.pid
+                        if [ -f "${PID_FILE}" ]; then
+                            kill "$(cat "${PID_FILE}" 2>/dev/null)" 2>/dev/null || true
+                        else
+                            pkill -x repmgrd 2>/dev/null || true
+                        fi
+                        sleep 2
+                        rm -f "${PID_FILE}"
+                        su - postgres -c "repmgrd -f /etc/repmgr.conf --pid-file=${PID_FILE} --daemonize"'
                     sleep 2
-                    if docker exec "${CONTAINER}" pgrep -f repmgrd >/dev/null 2>&1; then
+                    if docker exec "${CONTAINER}" pgrep -x repmgrd >/dev/null 2>&1; then
                         echo "✅ repmgrd 重启成功"
                     else
                         echo "❌ repmgrd 重启失败，请查看日志（选项 5）"
