@@ -47,7 +47,7 @@ start_keepalived() {
 
         : > "${LOG_FILE}" 2>/dev/null || true
         ha_log_info "keepalived_start command=/usr/sbin/keepalived attempt=${START_ATTEMPT}"
-        run_as_root /usr/sbin/keepalived --no-syslog --log-console --log-detail --pid="${PID_FILE}" >"${LOG_FILE}" 2>&1 &
+        run_as_root /usr/sbin/keepalived  --dont-fork --no-syslog --log-console --log-detail --pid="${PID_FILE}" >"${LOG_FILE}" 2>&1 &
         sleep 1
 
         if pgrep -x keepalived >/dev/null 2>&1; then
@@ -78,8 +78,23 @@ stop_keepalived() {
         run_as_root /usr/bin/killall keepalived 2>/dev/null || true
     fi
 
+    # keepalived 退出时需执行 notify_stop 脚本并摘除 VIP，可能耗时 1 秒以上。
+    # 必须等待进程真正退出，否则随后的 start 会把仍在退出的旧进程
+    # 误判为 already_running 而跳过启动，导致重启后 keepalived 消失。
+    local stop_waited=0
+    while pgrep -x keepalived >/dev/null 2>&1; do
+        stop_waited=$((stop_waited + 1))
+        if [ "${stop_waited}" -ge 15 ]; then
+            ha_log_warn "keepalived_stop_timeout_force_kill waited=${stop_waited}s"
+            run_as_root /usr/bin/killall -9 keepalived 2>/dev/null || true
+            sleep 1
+            break
+        fi
+        sleep 1
+    done
+    ha_log_info "keepalived_stopped waited=${stop_waited}s still_running=$(pgrep -x keepalived >/dev/null 2>&1 && echo yes || echo no)"
+
     rm -f "${PID_FILE}"
-    ha_log_info "keepalived_stopped"
     log_vip_snapshot || true
 }
 

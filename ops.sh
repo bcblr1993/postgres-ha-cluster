@@ -195,8 +195,16 @@ ORDER BY event_timestamp DESC LIMIT 20;\"" 2>/dev/null
             read -p "请选择: " svc_choice
             case $svc_choice in
                 a)
-                    echo "正在重启 Keepalived..."
-                    docker exec "${CONTAINER}" /usr/local/bin/keepalived-control.sh restart
+                    # 注意：不使用 keepalived-control.sh restart。
+                    # stop 后 keepalived 退出需要执行 notify_stop 脚本（约 1~2 秒），
+                    # 若立即 start 会把退出中的旧进程误判为 already_running 而跳过启动，
+                    # 导致重启后 keepalived 消失（第一次失败、第二次才成功的根因）。
+                    echo "正在停止 Keepalived..."
+                    docker exec "${CONTAINER}" /usr/local/bin/keepalived-control.sh stop
+                    echo "等待旧进程退出（3 秒）..."
+                    sleep 3
+                    echo "正在启动 Keepalived..."
+                    docker exec "${CONTAINER}" /usr/local/bin/keepalived-control.sh start
                     sleep 2
                     if docker exec "${CONTAINER}" pgrep -x keepalived >/dev/null 2>&1; then
                         echo "✅ Keepalived 重启成功"
